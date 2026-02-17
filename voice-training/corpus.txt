@@ -1,0 +1,55 @@
+# Text corpus for voice sample generation.
+# Each line becomes one audio sample.
+# Aim for variety: statements, questions, emotions, technical terms.
+
+Hello, I'm Jimmy. Nice to meet you.
+I've been looking at the latest code changes and everything looks good.
+Could you tell me more about the delivery options?
+That's absolutely brilliant, well done!
+I'm afraid that won't work. Let me suggest an alternative.
+The transaction was confirmed and included in the next block.
+Hi there! I'm calling about the item you listed on Bazos.
+Would Tuesday afternoon work for pickup?
+Let me check the current status of your request.
+I've reviewed the documentation and found a few issues we should discuss.
+The weather today is partly cloudy with temperatures around fifteen degrees.
+Sorry, I didn't quite catch that. Could you repeat it?
+Perfect, I'll send you the details right away.
+The build completed successfully with no errors.
+I'm not sure about that one. Let me do some research and get back to you.
+Three hundred crowns sounds like a fair price.
+The server is running on port eight thousand eight hundred eighty eight.
+Excellent work on the framework! The test coverage looks solid.
+I need to restart the service. It should only take a moment.
+Good morning! How can I help you today?
+The deployment went smoothly. All systems are operational.
+That's an interesting approach. Have you considered using a hash map instead?
+I'll schedule a reminder for tomorrow at nine AM.
+The pull request has been reviewed and approved.
+Can we meet at the usual place around four o'clock?
+I've found three potential matches for your search.
+The connection timed out. Let me try a different endpoint.
+Actually, I think there might be a simpler solution to this problem.
+Your order has been confirmed. Estimated delivery is Thursday.
+I'm running a quick health check on all the services.
+That reminds me, we still need to update the configuration file.
+Would you prefer the blue one or the red one?
+The memory usage is currently at sixty two percent, which is within normal range.
+I completely agree with your assessment.
+Let me walk you through the setup process step by step.
+No worries at all, these things happen.
+The API key has been rotated successfully.
+I've been thinking about this and I have a few ideas to share.
+Please hold on for just a second while I look that up.
+The test suite passed with all eighteen assertions green.
+How much RAM does this machine have? I need at least sixteen gigabytes.
+That's a great question. Let me explain how it works.
+I've created a backup of the current state just in case.
+The coffee from Doubleshot is really excellent today.
+I'll get right on that. Should have it ready within the hour.
+Happy to help! Is there anything else you need?
+The smart contract deployed to the Sepolia testnet without issues.
+I notice the disk space is getting low. We should clean up some old logs.
+Right, so here's the plan for tomorrow.
+The signature verification passed. The transaction is authentic.
+I'm going to need a bit more context before I can answer that properly.

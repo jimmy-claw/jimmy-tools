@@ -1,0 +1,14 @@
+# Sample generation
+transformers>=4.45.0
+torch>=2.1.0
+soundfile
+librosa
+numpy
+
+# Dataset preparation
+whisper-at  # or openai-whisper
+pydub
+
+# Piper training (handled via Docker, but for local:)
+# piper-tts
+# onnxruntime
