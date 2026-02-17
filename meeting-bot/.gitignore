@@ -1,0 +1,5 @@
+recordings/
+models/
+__pycache__/
+*.pyc
+*.wav
