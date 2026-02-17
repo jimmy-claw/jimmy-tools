@@ -1,0 +1,13 @@
+[Unit]
+Description=Workspace File Browser
+After=network.target
+
+[Service]
+Type=simple
+User=vpavlin
+ExecStart=/usr/bin/python3 /home/vpavlin/.openclaw/workspace/scripts/workspace-server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
