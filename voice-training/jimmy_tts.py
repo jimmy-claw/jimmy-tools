@@ -68,7 +68,7 @@ def load_model():
     from TTS.tts.models.xtts import Xtts
     import torch
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = os.environ.get("JIMMY_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading XTTS model on {device}...", file=sys.stderr)
     config = XttsConfig()
     config.load_json(os.path.join(MODEL_DIR, "config.json"))
