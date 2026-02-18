@@ -66,20 +66,23 @@ def split_text(text, max_chars=MAX_CHARS):
 def load_model():
     from TTS.tts.configs.xtts_config import XttsConfig
     from TTS.tts.models.xtts import Xtts
+    import torch
 
-    print("Loading XTTS model...", file=sys.stderr)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading XTTS model on {device}...", file=sys.stderr)
     config = XttsConfig()
     config.load_json(os.path.join(MODEL_DIR, "config.json"))
     model = Xtts.init_from_config(config)
     model.load_checkpoint(config, checkpoint_dir=MODEL_DIR, eval=True)
-    return model
+    model.to(device)
+    return model, device
 
 
 def synthesize(text, output_path, volume=2.0):
     reference = denoise_reference()
-    model = load_model()
+    model, device = load_model()
 
-    print("Computing speaker embedding...", file=sys.stderr)
+    print(f"Computing speaker embedding on {device}...", file=sys.stderr)
     gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
         audio_path=[reference]
     )
