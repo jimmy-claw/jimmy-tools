@@ -63,20 +63,19 @@ def load_model(mode="design"):
 def generate_sample(model, text, output_path, voice_description=None, reference_audio=None, mode="design"):
     """Generate a single speech sample."""
     if mode == "design":
-        # VoiceDesign: speaker is a name, instruct describes the voice character
-        wavs, sr = model.generate_custom_voice(
+        # VoiceDesign model: generate_voice_design()
+        wavs, sr = model.generate_voice_design(
             text=text,
             language="English",
-            speaker="Jimmy",
             instruct=voice_description,
         )
     else:
-        # CustomVoice: clone from reference audio
+        # CustomVoice model: generate_custom_voice() with reference audio
         wavs, sr = model.generate_custom_voice(
             text=text,
             language="English",
             speaker="Jimmy",
-            instruct="Clone the voice from the reference audio exactly.",
+            instruct="Speak with the same voice as the reference audio.",
             reference_audio=reference_audio,
         )
 
