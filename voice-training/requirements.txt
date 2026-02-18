@@ -1,4 +1,5 @@
 # Sample generation
+qwen-tts          # Qwen3-TTS custom package (includes model loading)
 transformers>=4.45.0
 torch>=2.1.0
 soundfile
