@@ -36,8 +36,10 @@ def load_model(mode="design"):
         from qwen_tts import Qwen3TTSModel
     except ImportError:
         print("Installing qwen-tts...")
-        os.system("pip install qwen-tts")
+        os.system("pip install -U qwen-tts")
         from qwen_tts import Qwen3TTSModel
+
+    import torch
 
     if mode == "design":
         model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
@@ -47,25 +49,36 @@ def load_model(mode="design"):
     print(f"Loading model: {model_name}")
     print("This may take a few minutes on first run (downloading weights)...")
 
-    model = Qwen3TTSModel(model_name)
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    model = Qwen3TTSModel.from_pretrained(
+        model_name,
+        device_map=device,
+        dtype=dtype,
+    )
     return model
 
 
 def generate_sample(model, text, output_path, voice_description=None, reference_audio=None, mode="design"):
     """Generate a single speech sample."""
     if mode == "design":
-        audio, sr = model.synthesize(
+        # VoiceDesign: use instruct field for voice description
+        wavs, sr = model.generate_custom_voice(
             text=text,
-            voice_description=voice_description,
+            language="English",
+            instruct=voice_description,
         )
     else:
-        audio, sr = model.synthesize(
+        # CustomVoice: clone from reference audio
+        wavs, sr = model.generate_voice_clone(
             text=text,
+            language="English",
             reference_audio=reference_audio,
         )
 
-    sf.write(output_path, audio, samplerate=sr)
-    return len(audio) / sr  # duration in seconds
+    sf.write(output_path, wavs[0], sr)
+    return len(wavs[0]) / sr  # duration in seconds
 
 
 def load_corpus(corpus_path):
