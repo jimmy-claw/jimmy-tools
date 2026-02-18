@@ -74,8 +74,8 @@ def generate_sample(model, text, output_path, voice_description=None, reference_
         wavs, sr = model.generate_custom_voice(
             text=text,
             language="English",
-            speaker="Jimmy",
-            instruct="Speak with the same voice as the reference audio.",
+            speaker="aiden",
+            instruct="Speak with the same voice, accent and tone as the reference audio.",
             reference_audio=reference_audio,
         )
 
