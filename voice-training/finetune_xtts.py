@@ -51,6 +51,7 @@ config.datasets = [
         "dataset_name": "jimmy",
         "path": TRAINING_DATA,
         "meta_file_train": "metadata.csv",
+        "meta_file_val": "",
         "language": "en",
     }
 ]
