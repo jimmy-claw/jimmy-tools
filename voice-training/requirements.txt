@@ -6,7 +6,7 @@ librosa
 numpy
 
 # Dataset preparation
-whisper-at  # or openai-whisper
+openai-whisper  # use instead of whisper-at (no triton conflict)
 pydub
 
 # Piper training (handled via Docker, but for local:)
