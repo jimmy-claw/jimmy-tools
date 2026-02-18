@@ -208,7 +208,7 @@ def main():
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f, delimiter="|")
         for filename, text in metadata:
-            writer.writerow([filename, text])
+            writer.writerow([filename, text, text])
 
     print(f"\nDone! {len(metadata)} samples in {OUTPUT_DIR}", file=sys.stderr)
     print(f"Metadata: {csv_path}", file=sys.stderr)
