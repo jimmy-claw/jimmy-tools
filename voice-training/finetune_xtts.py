@@ -86,6 +86,7 @@ def main():
         eval_batch_size=2,
         num_loader_workers=2,
         eval_split_max_size=10,
+        eval_split_size=0.1,
         print_step=25,
         plot_step=100,
         log_model_step=1000,
