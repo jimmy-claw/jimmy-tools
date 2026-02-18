@@ -23,7 +23,7 @@ network:
       dhcp4: true
       access-points:
         "Internety":
-          password: "LQDDTY02"
+          password: "YOUR_WIFI_PASSWORD"
 EOF2
 
 sudo chmod 600 /etc/netplan/60-wifi.yaml
