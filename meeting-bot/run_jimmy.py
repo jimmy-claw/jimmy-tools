@@ -1,15 +1,44 @@
 #!/usr/bin/env python3
-"""Meeting bot: join Jitsi, transcribe, respond via OpenClaw agent + XTTS voice."""
+"""Meeting bot v3: Silero VAD + Whisper + XTTS + OpenClaw agent IPC.
+
+Features:
+- Silero VAD for speech detection (no fixed chunks — captures full utterances)
+- Per-meeting transcript files: transcripts/YYYY-MM-DD_HHMMSS_{meeting-name}.md
+- XTTS voice synthesis on K11 with sentence chunking
+- Agent IPC via /tmp/meeting-bot-{inbox,outbox}.jsonl
+- headless=False required for WebRTC audio in Xvfb
+- module-remap-source required for PipeWire mic routing
+
+Usage:
+    xvfb-run -a python3 run_jimmy.py https://meet.jit.si/YourMeetingRoom
+
+Prerequisites (run once per boot):
+    pactl load-module module-null-sink sink_name=virtual-mic
+    pactl load-module module-null-sink sink_name=meeting-sink
+    pactl load-module module-remap-source source_name=jimmy-mic master=virtual-mic.monitor
+    pactl set-default-source jimmy-mic
+    pactl set-default-sink meeting-sink
+"""
 
 import subprocess, numpy as np, soundfile as sf, os, time, json, sys, asyncio, re, tempfile
-import urllib.request
+import datetime, urllib.request, io
+from pathlib import Path
 from playwright.async_api import async_playwright
 
+# --- Config ---
 MEETING_URL = sys.argv[1] if len(sys.argv) > 1 else "https://meet.jit.si/JimmyAndVaclav2026-v2"
 MONITOR = "meeting-sink.monitor"
 TTS_SINK = "virtual-mic"
-CHUNK_SEC = 6
 BOT_NAME = "Jimmy"
+SAMPLE_RATE = 16000
+
+# VAD settings
+VAD_THRESHOLD = 0.3        # Speech probability threshold
+SPEECH_PAD_MS = 600        # Padding around speech segments (ms)
+MIN_SPEECH_SEC = 1.0       # Minimum speech duration to transcribe
+MAX_SPEECH_SEC = 30.0      # Maximum continuous speech before forced transcription
+SILENCE_TIMEOUT_SEC = 1.5  # How long silence before we consider utterance complete
+CAPTURE_CHUNK_SEC = 0.5    # Small capture chunks for VAD processing
 
 # XTTS server on K11
 XTTS_URL = "http://192.168.0.125:5005"
@@ -20,29 +49,187 @@ XTTS_KEY = "jimmy-local-key"
 AGENT_INBOX = "/tmp/meeting-bot-inbox.jsonl"
 AGENT_OUTBOX = "/tmp/meeting-bot-outbox.jsonl"
 
-
-# --- Audio ---
-def capture():
-    subprocess.run(["ffmpeg", "-f", "pulse", "-i", MONITOR, "-ac", "1", "-ar", "16000",
-                    "-t", str(CHUNK_SEC), "/tmp/chunk.wav", "-y",
-                    "-loglevel", "error"], timeout=CHUNK_SEC + 5)
-    data, sr = sf.read("/tmp/chunk.wav", dtype="float32")
-    return data
+# Transcript
+SCRIPT_DIR = Path(__file__).parent
+TRANSCRIPT_DIR = SCRIPT_DIR / "transcripts"
 
 
+# --- Transcript ---
+class Transcript:
+    def __init__(self, meeting_url):
+        TRANSCRIPT_DIR.mkdir(exist_ok=True)
+        now = datetime.datetime.now()
+        # Extract meeting name from URL
+        meeting_name = meeting_url.rstrip("/").split("/")[-1]
+        # Sanitize for filename
+        meeting_name = re.sub(r'[^a-zA-Z0-9_-]', '_', meeting_name)
+        self.filename = TRANSCRIPT_DIR / f"{now.strftime('%Y-%m-%d_%H%M%S')}_{meeting_name}.md"
+        self.lines = []
+        # Write header
+        self._write_header(meeting_url, now)
+        print(f"[transcript] Saving to {self.filename}", flush=True)
+
+    def _write_header(self, url, now):
+        header = f"""# Meeting Transcript
+
+**Meeting:** {url}
+**Date:** {now.strftime('%Y-%m-%d %H:%M')}
+**Bot:** {BOT_NAME}
+
+---
+
+"""
+        with open(self.filename, "w") as f:
+            f.write(header)
+
+    def add(self, speaker, text, action=False):
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        prefix = "*" if action else ""
+        line = f"[{ts}] {prefix}{speaker}{prefix}: {text}"
+        self.lines.append(line)
+        # Append to file (not overwrite)
+        with open(self.filename, "a") as f:
+            f.write(line + "\n")
+        print(line, flush=True)
+
+
+# --- Silero VAD ---
+class VADCapture:
+    """Capture audio using Silero VAD for intelligent speech segmentation."""
+
+    def __init__(self):
+        import torch
+        self.torch = torch
+        print("[vad] Loading Silero VAD...", flush=True)
+        model, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
+        self.model = model
+        self.get_speech_timestamps = utils[0]
+        print("[vad] Silero VAD ready", flush=True)
+
+        self.audio_buffer = np.array([], dtype=np.float32)
+        self.silence_start = None
+        self.speech_start = None
+        self.is_speaking = False
+
+    def capture_chunk(self):
+        """Capture a small chunk of audio from PulseAudio."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            path = f.name
+        try:
+            subprocess.run([
+                "ffmpeg", "-f", "pulse", "-i", MONITOR,
+                "-ac", "1", "-ar", str(SAMPLE_RATE),
+                "-t", str(CAPTURE_CHUNK_SEC), path, "-y",
+                "-loglevel", "error"
+            ], timeout=CAPTURE_CHUNK_SEC + 3, capture_output=True)
+            data, _ = sf.read(path, dtype="float32")
+            return data
+        except Exception as e:
+            print(f"[vad] Capture error: {e}", flush=True)
+            return np.zeros(int(SAMPLE_RATE * CAPTURE_CHUNK_SEC), dtype=np.float32)
+        finally:
+            try:
+                os.unlink(path)
+            except:
+                pass
+
+    def has_speech(self, audio):
+        """Check if audio chunk contains speech using Silero VAD."""
+        try:
+            # Silero expects 16kHz mono, 512 samples per chunk
+            tensor = self.torch.from_numpy(audio).float()
+            # Process in 512-sample windows
+            chunk_size = 512
+            max_prob = 0.0
+            for i in range(0, len(tensor) - chunk_size, chunk_size):
+                chunk = tensor[i:i + chunk_size]
+                prob = self.model(chunk, SAMPLE_RATE).item()
+                max_prob = max(max_prob, prob)
+            return max_prob > VAD_THRESHOLD, max_prob
+        except Exception as e:
+            # Fallback to RMS
+            rms = np.sqrt(np.mean(audio ** 2))
+            return rms > 0.005, rms
+
+    def get_utterance(self):
+        """Capture audio until a complete utterance is detected.
+
+        Returns the full utterance audio, or None if no speech detected.
+        Uses VAD to detect speech start/end, with timeouts for safety.
+        """
+        self.audio_buffer = np.array([], dtype=np.float32)
+        self.silence_start = None
+        self.speech_start = None
+        wait_chunks = 0
+        max_wait = int(2.0 / CAPTURE_CHUNK_SEC)  # Wait up to 2s for speech to start
+
+        while True:
+            chunk = self.capture_chunk()
+            speech_detected, prob = self.has_speech(chunk)
+
+            if not self.speech_start:
+                # Waiting for speech to start
+                if speech_detected:
+                    self.speech_start = time.time()
+                    self.audio_buffer = np.concatenate([self.audio_buffer, chunk])
+                    self.silence_start = None
+                else:
+                    wait_chunks += 1
+                    if wait_chunks > max_wait:
+                        return None  # No speech detected
+            else:
+                # Speech in progress — accumulate
+                self.audio_buffer = np.concatenate([self.audio_buffer, chunk])
+
+                if speech_detected:
+                    self.silence_start = None
+                else:
+                    # Silence during speech — potential end of utterance
+                    if self.silence_start is None:
+                        self.silence_start = time.time()
+                    elif time.time() - self.silence_start > SILENCE_TIMEOUT_SEC:
+                        # Utterance complete
+                        duration = len(self.audio_buffer) / SAMPLE_RATE
+                        if duration >= MIN_SPEECH_SEC:
+                            return self.audio_buffer
+                        else:
+                            # Too short, reset
+                            self.audio_buffer = np.array([], dtype=np.float32)
+                            self.speech_start = None
+                            self.silence_start = None
+                            wait_chunks = 0
+
+                # Safety: force transcription if utterance is too long
+                duration = len(self.audio_buffer) / SAMPLE_RATE
+                if duration >= MAX_SPEECH_SEC:
+                    return self.audio_buffer
+
+
+# --- Whisper Transcription ---
 def transcribe(whisper, audio):
+    """Transcribe audio with Whisper, with de-duplication."""
     segments, _ = whisper.transcribe(audio, language="en")
     text = " ".join(seg.text.strip() for seg in segments).strip()
+    # De-duplicate (Whisper sometimes repeats)
     words = text.split()
     if len(words) > 6:
         half = len(words) // 2
-        if " ".join(words[:half]) == " ".join(words[half:half*2]):
+        if " ".join(words[:half]) == " ".join(words[half:half * 2]):
+            return ""
+    # Filter Whisper hallucinations on silence
+    hallucinations = [
+        "thank you for watching", "thanks for watching", "see you in the next",
+        "subscribe", "like and subscribe", "please subscribe",
+    ]
+    text_lower = text.lower()
+    for h in hallucinations:
+        if h in text_lower and len(words) < 10:
             return ""
     return text
 
 
 # --- TTS via XTTS on K11 (sentence chunking) ---
-def speak(text):
+def speak(text, transcript):
     """Generate TTS via K11 XTTS server, play each sentence as it's ready."""
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     sentences = [s for s in sentences if s.strip()]
@@ -66,20 +253,20 @@ def speak(text):
             )
             mp3_path = tempfile.mktemp(suffix=".mp3")
             wav_path = tempfile.mktemp(suffix=".wav")
-            
+
             print(f"[tts] Generating: '{sentence[:60]}'", flush=True)
             with urllib.request.urlopen(req, timeout=120) as resp:
                 with open(mp3_path, "wb") as f:
                     f.write(resp.read())
 
             # Convert mp3 → wav for paplay
-            subprocess.run(["ffmpeg", "-y", "-i", mp3_path, "-ar", "16000", "-ac", "1",
-                           "-f", "wav", wav_path], capture_output=True, timeout=30)
-            
+            subprocess.run(["ffmpeg", "-y", "-i", mp3_path, "-ar", str(SAMPLE_RATE), "-ac", "1",
+                            "-f", "wav", wav_path], capture_output=True, timeout=30)
+
             # Play into virtual mic
             subprocess.run(["paplay", "--device", TTS_SINK, wav_path], timeout=60)
             print(f"[tts] Played sentence", flush=True)
-            
+
             os.unlink(mp3_path)
             os.unlink(wav_path)
         except Exception as e:
@@ -116,38 +303,46 @@ def read_agent_response():
         return None
 
 
-# --- Venice Fallback (if agent doesn't respond in time) ---
-VENICE_KEY = os.environ.get("VENICE_API_KEY", "VENICE-INFERENCE-KEY-99xGJuyfeaxX4LIJu0fzrd7fexih-BYWDEZ9m-SWhY")
-
-conversation = [
-    {"role": "system", "content": "You are Jimmy, a sharp and witty AI assistant with a Scottish accent. You are in a voice meeting with Václav (a software engineer at Logos). Keep responses SHORT - max 1-2 sentences. Be natural and conversational. No markdown, no formatting, no asterisks."}
-]
-
-def llm_fallback(user_text):
-    conversation.append({"role": "user", "content": user_text})
-    if len(conversation) > 12:
-        conversation[:] = conversation[:1] + conversation[-10:]
+# --- PulseAudio Setup ---
+def setup_pulseaudio():
+    """Ensure virtual audio devices exist."""
     try:
-        payload = json.dumps({
-            "model": "llama-3.3-70b", "messages": conversation,
-            "max_tokens": 100, "temperature": 0.7,
-        })
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "15",
-             "https://api.venice.ai/api/v1/chat/completions",
-             "-H", f"Authorization: Bearer {VENICE_KEY}",
-             "-H", "Content-Type: application/json",
-             "-d", payload],
-            capture_output=True, text=True, timeout=20
-        )
-        data = json.loads(result.stdout)
-        reply = data["choices"][0]["message"]["content"]
-        if "<think>" in reply:
-            reply = reply.split("</think>")[-1].strip()
-        conversation.append({"role": "assistant", "content": reply})
-        return reply
-    except:
-        return None
+        sinks = subprocess.run(["pactl", "list", "sinks", "short"],
+                               capture_output=True, text=True, timeout=5).stdout
+
+        if "virtual-mic" not in sinks:
+            subprocess.run(["pactl", "load-module", "module-null-sink",
+                            "sink_name=virtual-mic",
+                            "sink_properties=device.description=Virtual-Mic"],
+                           capture_output=True, timeout=5)
+            print("[audio] Created virtual-mic sink", flush=True)
+
+        if "meeting-sink" not in sinks:
+            subprocess.run(["pactl", "load-module", "module-null-sink",
+                            "sink_name=meeting-sink",
+                            "sink_properties=device.description=Meeting-Sink"],
+                           capture_output=True, timeout=5)
+            print("[audio] Created meeting-sink sink", flush=True)
+
+        sources = subprocess.run(["pactl", "list", "sources", "short"],
+                                 capture_output=True, text=True, timeout=5).stdout
+
+        if "jimmy-mic" not in sources:
+            subprocess.run(["pactl", "load-module", "module-remap-source",
+                            "source_name=jimmy-mic",
+                            "master=virtual-mic.monitor",
+                            "source_properties=device.description=Jimmy-Mic"],
+                           capture_output=True, timeout=5)
+            print("[audio] Created jimmy-mic remap source", flush=True)
+
+        subprocess.run(["pactl", "set-default-source", "jimmy-mic"],
+                       capture_output=True, timeout=5)
+        subprocess.run(["pactl", "set-default-sink", "meeting-sink"],
+                       capture_output=True, timeout=5)
+        print("[audio] PulseAudio configured ✓", flush=True)
+
+    except Exception as e:
+        print(f"[audio] Setup warning: {e}", flush=True)
 
 
 # --- Browser ---
@@ -168,7 +363,8 @@ async def join_meeting():
     await asyncio.sleep(4)
     try:
         await page.locator('input[placeholder*="name" i]').first.fill(BOT_NAME)
-    except: pass
+    except:
+        pass
     await asyncio.sleep(0.5)
     try:
         await page.locator('[data-testid="prejoin.joinMeeting"]').first.click(timeout=5000)
@@ -181,15 +377,23 @@ async def join_meeting():
 
 # --- Main Loop ---
 async def main():
+    # Setup
+    setup_pulseaudio()
+
     for f in [AGENT_INBOX, AGENT_OUTBOX]:
         open(f, "w").close()
 
     print("[bot] Loading Whisper...", flush=True)
     from faster_whisper import WhisperModel
-    whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
+    whisper = WhisperModel("base", device="cpu", compute_type="int8")
+    print("[bot] Whisper ready", flush=True)
+
+    vad = VADCapture()
+    transcript = Transcript(MEETING_URL)
 
     pw, browser, page = await join_meeting()
-    print("[loop] Listening... (agent IPC + Venice fallback)", flush=True)
+    transcript.add("System", f"Bot joined {MEETING_URL}", action=True)
+    print("[loop] Listening with VAD... (agent IPC, no fallback)", flush=True)
 
     last_speak_time = 0
     round_num = 0
@@ -200,31 +404,35 @@ async def main():
             agent_resp = read_agent_response()
             if agent_resp:
                 print(f"[agent] {agent_resp}", flush=True)
-                speak(agent_resp)
+                transcript.add(BOT_NAME, agent_resp)
+                speak(agent_resp, transcript)
                 last_speak_time = time.time()
 
-            # Capture audio
-            audio = capture()
-            rms = np.sqrt(np.mean(audio**2))
-            if rms < 0.001:
+            # Capture utterance using VAD
+            audio = vad.get_utterance()
+            if audio is None:
                 continue
 
+            duration = len(audio) / SAMPLE_RATE
+            print(f"[vad] Utterance: {duration:.1f}s", flush=True)
+
+            # Transcribe
             text = transcribe(whisper, audio)
-            if not text or len(text.split()) < 3:
+            if not text or len(text.split()) < 2:
                 continue
 
             round_num += 1
-            print(f"[hear #{round_num}] {text}", flush=True)
+            transcript.add("Speaker", text)
 
             now = time.time()
-            if now - last_speak_time < 10:
-                continue
+            if now - last_speak_time < 8:
+                continue  # Don't interrupt ourselves
 
             # Write to agent inbox
             write_to_agent(text, round_num)
 
-            # Wait for agent response (no fallback — just me)
-            for _ in range(30):  # Wait up to 30s
+            # Wait for agent response (up to 30s)
+            for _ in range(30):
                 await asyncio.sleep(1)
                 agent_resp = read_agent_response()
                 if agent_resp:
@@ -232,7 +440,8 @@ async def main():
 
             if agent_resp:
                 print(f"[agent] {agent_resp}", flush=True)
-                speak(agent_resp)
+                transcript.add(BOT_NAME, agent_resp)
+                speak(agent_resp, transcript)
                 last_speak_time = time.time()
             else:
                 print(f"[timeout] No agent response for round {round_num}", flush=True)
@@ -240,6 +449,8 @@ async def main():
     except KeyboardInterrupt:
         pass
     finally:
+        transcript.add("System", "Bot left the meeting", action=True)
+        print(f"\n[bot] Transcript saved to {transcript.filename}", flush=True)
         await browser.close()
         await pw.stop()
 
