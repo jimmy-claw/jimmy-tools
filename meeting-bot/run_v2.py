@@ -182,7 +182,7 @@ def llm_fallback(user_text):
 async def join_meeting():
     print(f"[bot] Joining {MEETING_URL}", flush=True)
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=True, args=[
+    browser = await pw.chromium.launch(headless=False, args=[
         "--use-fake-ui-for-media-stream",
         "--disable-gpu", "--no-sandbox",
         "--autoplay-policy=no-user-gesture-required",
