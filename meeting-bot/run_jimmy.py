@@ -20,7 +20,7 @@ Prerequisites (run once per boot):
     pactl set-default-sink meeting-sink
 """
 
-import subprocess, numpy as np, soundfile as sf, os, time, json, sys, asyncio, re, tempfile
+import subprocess, numpy as np, soundfile as sf, os, time, json, sys, asyncio, re, tempfile, signal
 import datetime, urllib.request, io
 from pathlib import Path
 from playwright.async_api import async_playwright
@@ -40,6 +40,9 @@ MAX_SPEECH_SEC = 30.0      # Maximum continuous speech before forced transcripti
 SILENCE_TIMEOUT_SEC = 1.5  # How long silence before we consider utterance complete
 CAPTURE_CHUNK_SEC = 0.5    # Small capture chunks for VAD processing
 
+# STT server on K11
+STT_URL = "http://192.168.0.125:5006"
+
 # XTTS server on K11
 XTTS_URL = "http://192.168.0.125:5005"
 XTTS_VOICE = "jimmy"
@@ -49,9 +52,10 @@ XTTS_KEY = "jimmy-local-key"
 AGENT_INBOX = "/tmp/meeting-bot-inbox.jsonl"
 AGENT_OUTBOX = "/tmp/meeting-bot-outbox.jsonl"
 
-# Transcript
+# Transcript & Recording
 SCRIPT_DIR = Path(__file__).parent
 TRANSCRIPT_DIR = SCRIPT_DIR / "transcripts"
+RECORDINGS_DIR = SCRIPT_DIR / "recordings"
 
 
 # --- Transcript ---
@@ -205,18 +209,97 @@ class VADCapture:
                     return self.audio_buffer
 
 
-# --- Whisper Transcription ---
-def transcribe(whisper, audio):
-    """Transcribe audio with Whisper, with de-duplication."""
-    segments, _ = whisper.transcribe(audio, language="en")
-    text = " ".join(seg.text.strip() for seg in segments).strip()
-    # De-duplicate (Whisper sometimes repeats)
+# --- Meeting Recording ---
+class MeetingRecorder:
+    """Record full meeting audio from PulseAudio monitor to WAV file."""
+
+    def __init__(self, meeting_url):
+        RECORDINGS_DIR.mkdir(exist_ok=True)
+        now = datetime.datetime.now()
+        meeting_name = meeting_url.rstrip("/").split("/")[-1]
+        meeting_name = re.sub(r'[^a-zA-Z0-9_-]', '_', meeting_name)
+        self.filename = RECORDINGS_DIR / f"{now.strftime('%Y-%m-%d_%H%M%S')}_{meeting_name}.wav"
+        self.proc = None
+
+    def start(self):
+        cmd = [
+            "ffmpeg", "-f", "pulse", "-i", MONITOR,
+            "-ac", "1", "-ar", str(SAMPLE_RATE),
+            "-acodec", "pcm_s16le",
+            str(self.filename), "-y", "-loglevel", "warning",
+        ]
+        self.proc = subprocess.Popen(cmd)
+        print(f"[rec] Recording to {self.filename}", flush=True)
+
+    def stop(self):
+        if self.proc:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+            size = self.filename.stat().st_size / 1024 / 1024 if self.filename.exists() else 0
+            print(f"[rec] Stopped. File: {self.filename} ({size:.1f} MB)", flush=True)
+
+
+# --- Transcription via K11 STT Server ---
+def transcribe_remote(audio):
+    """Send audio to K11 STT server for transcription."""
+    try:
+        # Write audio to temp WAV file
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            sf.write(f, audio, SAMPLE_RATE)
+            tmp_path = f.name
+
+        # Send to K11
+        import http.client
+        import mimetypes
+        boundary = "----AudioBoundary"
+        with open(tmp_path, "rb") as f:
+            audio_data = f.read()
+        os.unlink(tmp_path)
+
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="audio"; filename="audio.wav"\r\n'
+            f"Content-Type: audio/wav\r\n\r\n"
+        ).encode() + audio_data + f"\r\n--{boundary}--\r\n".encode()
+
+        req = urllib.request.Request(
+            f"{STT_URL}/transcribe",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read())
+            text = result.get("text", "").strip()
+    except Exception as e:
+        print(f"[stt] K11 error, falling back to local: {e}", flush=True)
+        return transcribe_local(audio)
+
+    return _filter_text(text)
+
+
+def transcribe_local(audio):
+    """Fallback: transcribe locally with whisper base."""
+    try:
+        from faster_whisper import WhisperModel
+        if not hasattr(transcribe_local, "_model"):
+            transcribe_local._model = WhisperModel("base", device="cpu", compute_type="int8")
+        segments, _ = transcribe_local._model.transcribe(audio, language="en")
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+    except Exception as e:
+        print(f"[stt] Local transcription failed: {e}", flush=True)
+        return ""
+    return _filter_text(text)
+
+
+def _filter_text(text):
+    """De-duplicate and filter hallucinations."""
+    if not text:
+        return ""
     words = text.split()
     if len(words) > 6:
         half = len(words) // 2
         if " ".join(words[:half]) == " ".join(words[half:half * 2]):
             return ""
-    # Filter Whisper hallucinations on silence
     hallucinations = [
         "thank you for watching", "thanks for watching", "see you in the next",
         "subscribe", "like and subscribe", "please subscribe",
@@ -383,15 +466,12 @@ async def main():
     for f in [AGENT_INBOX, AGENT_OUTBOX]:
         open(f, "w").close()
 
-    print("[bot] Loading Whisper...", flush=True)
-    from faster_whisper import WhisperModel
-    whisper = WhisperModel("base", device="cpu", compute_type="int8")
-    print("[bot] Whisper ready", flush=True)
-
     vad = VADCapture()
     transcript = Transcript(MEETING_URL)
+    recorder = MeetingRecorder(MEETING_URL)
 
     pw, browser, page = await join_meeting()
+    recorder.start()
     transcript.add("System", f"Bot joined {MEETING_URL}", action=True)
     print("[loop] Listening with VAD... (agent IPC, no fallback)", flush=True)
 
@@ -416,8 +496,8 @@ async def main():
             duration = len(audio) / SAMPLE_RATE
             print(f"[vad] Utterance: {duration:.1f}s", flush=True)
 
-            # Transcribe
-            text = transcribe(whisper, audio)
+            # Transcribe via K11
+            text = transcribe_remote(audio)
             if not text or len(text.split()) < 2:
                 continue
 
@@ -449,8 +529,10 @@ async def main():
     except KeyboardInterrupt:
         pass
     finally:
+        recorder.stop()
         transcript.add("System", "Bot left the meeting", action=True)
         print(f"\n[bot] Transcript saved to {transcript.filename}", flush=True)
+        print(f"[bot] Recording saved to {recorder.filename}", flush=True)
         await browser.close()
         await pw.stop()
 

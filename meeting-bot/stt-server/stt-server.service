@@ -1,0 +1,15 @@
+[Unit]
+Description=STT Server (faster-whisper)
+After=network.target
+
+[Service]
+Type=simple
+User=jimmy
+WorkingDirectory=/home/jimmy/stt-server
+ExecStart=/usr/bin/python3 /home/jimmy/stt-server/stt_server.py --model medium --port 5006
+Restart=on-failure
+RestartSec=5
+Environment=STT_MODEL=medium
+
+[Install]
+WantedBy=multi-user.target
