@@ -58,6 +58,74 @@ def speak_piper(text: str, output_path: str = None) -> str:
     return output_path
 
 
+def speak_xtts(text: str, output_path: str = None) -> str:
+    """Generate speech using Jimmy's custom XTTS voice server on K11.
+
+    Supports sentence-level chunking: if config.XTTS_SENTENCE_CHUNK is True,
+    splits text into sentences and plays each one as it's ready, reducing
+    perceived latency in live meetings.
+
+    Returns path to last generated WAV file (or None if chunked+played inline).
+    """
+    import re
+    import urllib.request
+    import json
+
+    def _generate_and_play(sentence: str, path: str):
+        payload = json.dumps({
+            "text": sentence,
+            "model_id": "mp3_44100",
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
+        }).encode()
+        req = urllib.request.Request(
+            f"{config.XTTS_SERVER_URL}/v1/text-to-speech/{config.XTTS_VOICE_ID}",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "xi-api-key": config.XTTS_API_KEY,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            with open(path, "wb") as f:
+                f.write(resp.read())
+
+    if config.XTTS_SENTENCE_CHUNK:
+        # Split into sentences and play each as it's ready
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        sentences = [s for s in sentences if s.strip()]
+        for sentence in sentences:
+            chunk_path = tempfile.mktemp(suffix=".mp3")
+            try:
+                print(f"[speak_xtts] Generating: '{sentence[:60]}'")
+                _generate_and_play(sentence, chunk_path)
+                # Convert mp3 → wav at correct sample rate for paplay
+                wav_path = tempfile.mktemp(suffix=".wav")
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", chunk_path,
+                    "-ar", str(config.SAMPLE_RATE), "-ac", "1", "-f", "wav", wav_path,
+                ], capture_output=True, timeout=30)
+                inject_audio_to_meeting(wav_path)
+                os.unlink(wav_path)
+            finally:
+                if os.path.exists(chunk_path):
+                    os.unlink(chunk_path)
+        return None
+    else:
+        # Generate full text in one shot
+        if output_path is None:
+            output_path = tempfile.mktemp(suffix=".mp3")
+        _generate_and_play(text, output_path)
+        # Convert to wav for paplay
+        wav_path = tempfile.mktemp(suffix=".wav")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", output_path,
+            "-ar", str(config.SAMPLE_RATE), "-ac", "1", "-f", "wav", wav_path,
+        ], capture_output=True, timeout=60)
+        os.unlink(output_path)
+        return wav_path
+
+
 def speak_openai(text: str, output_path: str = None) -> str:
     """Generate speech using OpenAI TTS API.
     
@@ -130,13 +198,18 @@ def speak(text: str):
 
     if config.TTS_ENGINE == "openai":
         wav_path = speak_openai(text)
+    elif config.TTS_ENGINE == "xtts":
+        # XTTS handles inject_audio_to_meeting internally when chunking
+        wav_path = speak_xtts(text)
+        if wav_path is None:
+            return  # Already played sentence by sentence
     else:
         wav_path = speak_piper(text)
 
     try:
         inject_audio_to_meeting(wav_path)
     finally:
-        if os.path.exists(wav_path):
+        if wav_path and os.path.exists(wav_path):
             os.unlink(wav_path)
 
 

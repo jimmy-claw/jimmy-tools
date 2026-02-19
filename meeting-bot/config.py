@@ -22,11 +22,17 @@ CHUNK_DURATION_SEC = 5   # Process audio in N-second chunks
 SILENCE_THRESHOLD = 500  # RMS threshold for silence detection
 
 # TTS settings
-TTS_ENGINE = "piper"  # piper (local) or openai
+TTS_ENGINE = "xtts"  # piper (local), openai, or xtts (Jimmy's custom voice via K11)
 PIPER_MODEL = "models/en_GB-alan-medium.onnx"  # British male, closest to Irish available
 # For OpenAI TTS (needs OPENAI_API_KEY env var):
 OPENAI_TTS_MODEL = "tts-1"
 OPENAI_TTS_VOICE = "alloy"
+# For XTTS (Jimmy's custom voice — runs on K11):
+XTTS_SERVER_URL = "http://192.168.0.125:5005"
+XTTS_VOICE_ID = "jimmy"
+XTTS_API_KEY = "jimmy-local-key"
+# Sentence chunking for XTTS (play each sentence as it's ready instead of waiting for full response)
+XTTS_SENTENCE_CHUNK = True
 
 # Browser settings
 HEADLESS = True  # Set False for debugging
