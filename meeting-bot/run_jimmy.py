@@ -35,9 +35,9 @@ SAMPLE_RATE = 16000
 # VAD settings
 VAD_THRESHOLD = 0.3        # Speech probability threshold
 SPEECH_PAD_MS = 600        # Padding around speech segments (ms)
-MIN_SPEECH_SEC = 1.0       # Minimum speech duration to transcribe
-MAX_SPEECH_SEC = 30.0      # Maximum continuous speech before forced transcription
-SILENCE_TIMEOUT_SEC = 1.5  # How long silence before we consider utterance complete
+MIN_SPEECH_SEC = 1.5       # Minimum speech duration to transcribe
+MAX_SPEECH_SEC = 60.0      # Maximum continuous speech before forced transcription
+SILENCE_TIMEOUT_SEC = 3.5  # How long silence before we consider utterance complete
 CAPTURE_CHUNK_SEC = 0.5    # Small capture chunks for VAD processing
 
 # STT server on K11 (via SSH tunnel if direct connection fails)
