@@ -8,3 +8,4 @@ piper-models/
 transcript.txt
 meeting-bot/transcripts/*.md
 meeting-bot/transcript.md
+meeting-bot/recordings/
