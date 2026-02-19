@@ -8,6 +8,11 @@ Endpoints:
 
 Usage:
     python stt_server.py [--host 0.0.0.0] [--port 5006] [--model medium]
+
+Note: If firewall blocks port 5006, open it:
+    sudo firewall-cmd --add-port=5006/tcp --permanent && sudo firewall-cmd --reload
+Or use SSH tunnel from client:
+    ssh -L 5006:127.0.0.1:5006 jimmy@192.168.0.125 -N
 """
 
 import argparse

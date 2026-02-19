@@ -40,8 +40,11 @@ MAX_SPEECH_SEC = 30.0      # Maximum continuous speech before forced transcripti
 SILENCE_TIMEOUT_SEC = 1.5  # How long silence before we consider utterance complete
 CAPTURE_CHUNK_SEC = 0.5    # Small capture chunks for VAD processing
 
-# STT server on K11
-STT_URL = "http://192.168.0.125:5006"
+# STT server on K11 (via SSH tunnel if direct connection fails)
+STT_HOST = "192.168.0.125"
+STT_PORT = 5006
+STT_URL = f"http://{STT_HOST}:{STT_PORT}"
+STT_TUNNEL_URL = "http://127.0.0.1:5006"  # fallback via SSH tunnel
 
 # XTTS server on K11
 XTTS_URL = "http://192.168.0.125:5005"
@@ -240,17 +243,56 @@ class MeetingRecorder:
 
 
 # --- Transcription via K11 STT Server ---
+_stt_tunnel_proc = None
+_stt_base_url = None
+
+
+def _ensure_stt_connection():
+    """Ensure we can reach the STT server, setting up SSH tunnel if needed."""
+    global _stt_tunnel_proc, _stt_base_url
+    if _stt_base_url:
+        return _stt_base_url
+
+    # Try direct connection first
+    try:
+        req = urllib.request.Request(f"{STT_URL}/health")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            _stt_base_url = STT_URL
+            print(f"[stt] Connected directly to K11 at {STT_URL}", flush=True)
+            return _stt_base_url
+    except Exception:
+        pass
+
+    # Fall back to SSH tunnel
+    print(f"[stt] Direct connection failed, setting up SSH tunnel...", flush=True)
+    _stt_tunnel_proc = subprocess.Popen([
+        "ssh", "-N", "-L", f"{STT_PORT}:127.0.0.1:{STT_PORT}",
+        f"jimmy@{STT_HOST}", "-o", "StrictHostKeyChecking=no",
+    ])
+    time.sleep(2)
+    _stt_base_url = STT_TUNNEL_URL
+    print(f"[stt] SSH tunnel established, using {STT_TUNNEL_URL}", flush=True)
+    return _stt_base_url
+
+
+def cleanup_stt_tunnel():
+    global _stt_tunnel_proc
+    if _stt_tunnel_proc:
+        _stt_tunnel_proc.terminate()
+        _stt_tunnel_proc = None
+
+
 def transcribe_remote(audio):
     """Send audio to K11 STT server for transcription."""
     try:
+        base_url = _ensure_stt_connection()
+
         # Write audio to temp WAV file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             sf.write(f, audio, SAMPLE_RATE)
             tmp_path = f.name
 
         # Send to K11
-        import http.client
-        import mimetypes
         boundary = "----AudioBoundary"
         with open(tmp_path, "rb") as f:
             audio_data = f.read()
@@ -263,7 +305,7 @@ def transcribe_remote(audio):
         ).encode() + audio_data + f"\r\n--{boundary}--\r\n".encode()
 
         req = urllib.request.Request(
-            f"{STT_URL}/transcribe",
+            f"{base_url}/transcribe",
             data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
@@ -530,6 +572,7 @@ async def main():
         pass
     finally:
         recorder.stop()
+        cleanup_stt_tunnel()
         transcript.add("System", "Bot left the meeting", action=True)
         print(f"\n[bot] Transcript saved to {transcript.filename}", flush=True)
         print(f"[bot] Recording saved to {recorder.filename}", flush=True)
