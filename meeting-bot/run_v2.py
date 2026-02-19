@@ -94,23 +94,12 @@ def transcribe(whisper, audio):
 
 
 def speak(text):
-    """TTS with speed adjustment via sox."""
-    # Generate with piper
-    proc = subprocess.run(["piper", "--model", PIPER_MODEL, "--output_file", "/tmp/reply_raw.wav"],
-                          input=text.encode(), capture_output=True, timeout=30)
-    if proc.returncode != 0:
-        print(f"[tts] piper failed: {proc.stderr.decode()[:100]}", flush=True)
-        return
-    
-    # Speed up with sox
-    if TTS_SPEED != 1.0:
-        subprocess.run(["sox", "/tmp/reply_raw.wav", "/tmp/reply.wav", "tempo", str(TTS_SPEED)],
-                       capture_output=True, timeout=30)
-    else:
-        os.rename("/tmp/reply_raw.wav", "/tmp/reply.wav")
-    
-    # Play into virtual mic
-    subprocess.run(["paplay", "--device", TTS_SINK, "/tmp/reply.wav"], timeout=30)
+    """TTS via speak.py (XTTS on K11 with sentence chunking)."""
+    import speak as speak_module
+    try:
+        speak_module.speak(text)
+    except Exception as e:
+        print(f"[tts] speak failed: {e}", flush=True)
 
 
 # --- Agent Communication ---
@@ -193,7 +182,7 @@ def llm_fallback(user_text):
 async def join_meeting():
     print(f"[bot] Joining {MEETING_URL}", flush=True)
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=False, args=[
+    browser = await pw.chromium.launch(headless=True, args=[
         "--use-fake-ui-for-media-stream",
         "--disable-gpu", "--no-sandbox",
         "--autoplay-policy=no-user-gesture-required",
