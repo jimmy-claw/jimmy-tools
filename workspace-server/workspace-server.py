@@ -21,6 +21,13 @@ PORT = 8888
 CRIB_HOST = "jimmy@192.168.0.152"
 SSH_OPTS = ['-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=5']
 
+# Load favicon once at startup
+FAVICON_PATH = Path("/home/vpavlin/public/jimmy-avatar.png")
+try:
+    FAVICON_DATA = FAVICON_PATH.read_bytes()
+except Exception:
+    FAVICON_DATA = b''
+
 # Simple markdown-to-HTML (covers 90% of common markdown)
 def is_table_separator(line):
     """Check if a line is a markdown table separator like |---|---|"""
@@ -680,34 +687,34 @@ def render_status_page(pi5, crib):
   const grid = document.getElementById('status-grid');
   const note = document.getElementById('refresh-note');
 
+  function esc(s) {
+    return String(s==null?'?':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
   function renderHostCard(data) {
-    const host = (data.host || '?').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-    let h = '<div class="host-card"><h2>' + host + '</h2>';
-    const up = data.uptime || {};
-    const uptime = (up.uptime || up.raw || '?').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-    const load = (up.load_avg || '?').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-    h += '<div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value">' + uptime + '</span></div>';
-    h += '<div class="stat-row"><span class="stat-label">Load Avg</span><span class="stat-value">' + load + '</span></div>';
-    const mem = data.memory || {};
-    const memStr = (mem.used || '?') + ' / ' + (mem.total || '?');
-    h += '<div class="stat-row"><span class="stat-label">Memory</span><span class="stat-value">' + memStr + '</span></div>';
-    const disk = data.disk || {};
-    const diskStr = (disk.used || '?') + ' / ' + (disk.total || '?');
-    const pct = disk.use_pct || '0%';
-    const pctNum = parseInt(pct) || 0;
-    const barColor = pctNum < 70 ? 'var(--green)' : (pctNum < 90 ? 'var(--accent)' : 'var(--red)');
-    h += '<div class="stat-row"><span class="stat-label">Disk</span><span class="stat-value">' + diskStr + ' (' + pct + ')</span></div>';
+    var host = esc(data.host);
+    var h = '<div class="host-card"><h2>' + host + '</h2>';
+    var up = data.uptime || {};
+    h += '<div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value">' + esc(up.uptime || up.raw) + '</span></div>';
+    h += '<div class="stat-row"><span class="stat-label">Load Avg</span><span class="stat-value">' + esc(up.load_avg) + '</span></div>';
+    var mem = data.memory || {};
+    h += '<div class="stat-row"><span class="stat-label">Memory</span><span class="stat-value">' + esc(mem.used) + ' / ' + esc(mem.total) + '</span></div>';
+    var disk = data.disk || {};
+    var pct = disk.use_pct || '0%';
+    var pctNum = parseInt(pct) || 0;
+    var barColor = pctNum < 70 ? 'var(--green)' : (pctNum < 90 ? 'var(--accent)' : 'var(--red)');
+    h += '<div class="stat-row"><span class="stat-label">Disk</span><span class="stat-value">' + esc(disk.used) + ' / ' + esc(disk.total) + ' (' + esc(pct) + ')</span></div>';
     h += '<div class="pct-bar"><div class="pct-fill" style="width:' + pctNum + '%;background:' + barColor + '"></div></div>';
     if (data.openclaw_gateway) {
-      const gw = data.openclaw_gateway;
-      const badge = gw.running
+      var gw = data.openclaw_gateway;
+      var badge = gw.running
         ? '<span class="badge badge-up">RUNNING</span>'
         : '<span class="badge badge-down">STOPPED</span>';
       h += '<div class="stat-row"><span class="stat-label">OpenClaw GW</span><span class="stat-value">' + badge + '</span></div>';
     }
     if (data.claude_processes) {
-      const cp = data.claude_processes;
-      const badge = cp.running
+      var cp = data.claude_processes;
+      var badge = cp.running
         ? '<span class="badge badge-up">' + (cp.count || 0) + ' RUNNING</span>'
         : '<span class="badge badge-down">NONE</span>';
       h += '<div class="stat-row"><span class="stat-label">Claude Procs</span><span class="stat-value">' + badge + '</span></div>';
@@ -715,7 +722,6 @@ def render_status_page(pi5, crib):
       if (procs.length > 0) {
         for (var i = 0; i < procs.length; i++) {
           var p = procs[i];
-          var esc = function(s) { return (s||'?').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
           var taskName = p.task_name || '';
           var activities = p.activities || [];
           var header = taskName ? esc(taskName) : ('PID ' + esc(p.pid));
@@ -733,7 +739,7 @@ def render_status_page(pi5, crib):
             h += '</div>';
           } else {
             var tail = p.log_tail || [];
-            if (tail.length > 0) h += '<pre class="proc-log-tail">' + tail.map(esc).join('\n') + '</pre>';
+            if (tail.length > 0) h += '<pre class="proc-log-tail">' + tail.map(esc).join('\\n') + '</pre>';
             else h += '<div class="proc-none">No activity yet</div>';
           }
           h += '</div></details>';
@@ -780,6 +786,7 @@ def render_status_page(pi5, crib):
     return f"""<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="/favicon.ico">
 <title>System Status — Jimmy's Workspace</title>
 <style>{CSS}{STATUS_DASHBOARD_CSS}
 #spinner {{ display: inline-block; animation: spin 1s linear infinite; color: var(--accent); font-size: 0.8em; }}
@@ -837,6 +844,7 @@ def page(title, body, path='/'):
     return f"""<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="/favicon.ico">
 <title>{html.escape(title)} — Jimmy's Workspace</title>
 <style>{CSS}</style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
@@ -885,6 +893,18 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
         if not path:
             path = '/'
         
+        # Favicon
+        if path == '/favicon.ico':
+            if FAVICON_DATA:
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/png')
+                self.send_header('Cache-Control', 'public, max-age=86400')
+                self.end_headers()
+                self.wfile.write(FAVICON_DATA)
+            else:
+                self.send_error(404, "No favicon")
+            return
+
         # Coding agent status endpoint
         if path == '/coding-agent-status':
             self.send_response(200)
@@ -901,7 +921,7 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
                 else:
                     self.wfile.write(b'{"error": "SSH failed"}')
             except Exception as e:
-                self.wfile.write(f'{{"error": "{str(e)}"}}'.encode())
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
 
         # System status JSON endpoint
