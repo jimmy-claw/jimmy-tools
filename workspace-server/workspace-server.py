@@ -392,7 +392,7 @@ try:
         for line in f:
             recent.append(line)
     for raw in reversed(list(recent)):
-        if len(acts) >= 5:
+        if len(acts) >= 10:
             break
         s = raw.strip()
         if not s:
@@ -407,7 +407,7 @@ try:
                 if isinstance(c, list):
                     tus = [b for b in c if isinstance(b, dict) and b.get("type") == "tool_use"]
                     for b in reversed(tus):
-                        if len(acts) >= 5:
+                        if len(acts) >= 10:
                             break
                         n = b.get("name", "?")
                         inp = b.get("input", {})
