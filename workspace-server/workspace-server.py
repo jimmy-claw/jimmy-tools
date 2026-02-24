@@ -7,6 +7,8 @@ Serves the OpenClaw workspace directory with directory listings and markdown pre
 import os
 import re
 import html
+import json
+import subprocess
 import mimetypes
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -262,6 +264,25 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
         path = unquote(self.path).rstrip('/')
         if not path:
             path = '/'
+        
+        # Coding agent status endpoint
+        if path == '/coding-agent-status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            try:
+                result = subprocess.run(
+                    ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=5',
+                     'jimmy@192.168.0.152', 'cat', '~/coding-agent-status.json'],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    self.wfile.write(result.stdout.encode())
+                else:
+                    self.wfile.write(b'{"error": "SSH failed"}')
+            except Exception as e:
+                self.wfile.write(f'{{"error": "{str(e)}"}}'.encode())
+            return
         
         # Search handler
         if path.startswith('/search'):
