@@ -14,6 +14,7 @@ from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, quote
+import shlex
 
 WORKSPACE = Path("/home/vpavlin/.openclaw/workspace")
 PORT = 8888
@@ -323,6 +324,152 @@ def _clean_debug_line(line):
     return f"{time_str} {msg[:60]}"
 
 
+# Python script that runs on crib via SSH to parse JSONL conversation logs
+JSONL_PARSER_SCRIPT = r'''
+import json, glob, os, sys, time
+from collections import deque
+
+files = []
+for pattern in [
+    os.path.expanduser("~/.claude/projects/*/*.jsonl"),
+    os.path.expanduser("~/.claude/projects/*/*/*.jsonl"),
+]:
+    files.extend(glob.glob(pattern))
+
+if not files:
+    sys.exit(0)
+
+files.sort(key=os.path.getmtime, reverse=True)
+jf = files[0]
+
+if time.time() - os.path.getmtime(jf) > 7200:
+    sys.exit(0)
+
+task = ""
+try:
+    with open(jf) as f:
+        for raw in f:
+            s = raw.strip()
+            if not s:
+                continue
+            try:
+                o = json.loads(s)
+                t = o.get("type", "")
+                if t == "human" or o.get("role") == "user":
+                    c = o.get("message", o.get("content", ""))
+                    if isinstance(c, dict):
+                        c = c.get("content", c.get("text", ""))
+                    if isinstance(c, list):
+                        for b in c:
+                            if isinstance(b, dict) and b.get("type") == "text":
+                                c = b["text"]
+                                break
+                            elif isinstance(b, str):
+                                c = b
+                                break
+                    if isinstance(c, str) and c.strip():
+                        first = c.strip().split("\n")[0]
+                        for end in [". ", "! ", "? "]:
+                            idx = first.find(end)
+                            if 0 < idx < 100:
+                                first = first[:idx+1]
+                                break
+                        task = first[:120]
+                        break
+            except Exception:
+                continue
+except Exception:
+    pass
+
+acts = []
+try:
+    recent = deque(maxlen=200)
+    with open(jf) as f:
+        for line in f:
+            recent.append(line)
+    for raw in reversed(list(recent)):
+        if len(acts) >= 5:
+            break
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            o = json.loads(s)
+            t = o.get("type", "")
+            if t == "assistant" or o.get("role") == "assistant":
+                c = o.get("message", o.get("content", []))
+                if isinstance(c, dict):
+                    c = c.get("content", [])
+                if isinstance(c, list):
+                    tus = [b for b in c if isinstance(b, dict) and b.get("type") == "tool_use"]
+                    for b in reversed(tus):
+                        if len(acts) >= 5:
+                            break
+                        n = b.get("name", "?")
+                        inp = b.get("input", {})
+                        if n == "Read":
+                            p = inp.get("file_path", "?")
+                            sp = "/".join(p.split("/")[-2:]) if "/" in p else p
+                            d = "\U0001f50d Read " + sp
+                        elif n in ("Write", "Edit"):
+                            p = inp.get("file_path", "?")
+                            sp = "/".join(p.split("/")[-2:]) if "/" in p else p
+                            d = "\u270f\ufe0f  " + n + " " + sp
+                        elif n == "Bash":
+                            cm = inp.get("command", "?")
+                            d = "\u26a1 Bash: " + cm[:60]
+                        elif n == "Grep":
+                            pa = inp.get("pattern", "?")
+                            d = "\U0001f50d Grep: " + pa[:50]
+                        elif n == "Glob":
+                            pa = inp.get("pattern", "?")
+                            d = "\U0001f4c2 Glob: " + pa[:50]
+                        elif n == "Task":
+                            td = inp.get("description", "?")
+                            d = "\U0001f916 Task: " + td[:50]
+                        elif n == "WebFetch":
+                            u = inp.get("url", "?")
+                            d = "\U0001f310 Fetch: " + u[:50]
+                        elif n == "TodoWrite":
+                            d = "\U0001f4cb Updated todo list"
+                        elif n == "WebSearch":
+                            q = inp.get("query", "?")
+                            d = "\U0001f50e Search: " + q[:50]
+                        else:
+                            d = "\U0001f527 " + n
+                        acts.append(d)
+        except Exception:
+            continue
+except Exception:
+    pass
+
+acts.reverse()
+print(json.dumps({"task": task, "activities": acts, "file": os.path.basename(jf)}))
+'''
+
+
+def _get_jsonl_data():
+    """Parse latest JSONL conversation log from crib via SSH."""
+    try:
+        raw = _run_ssh(f"python3 -c {shlex.quote(JSONL_PARSER_SCRIPT)}", timeout=10)
+        if raw and not raw.startswith("error:"):
+            return json.loads(raw)
+    except (json.JSONDecodeError, Exception):
+        pass
+    return None
+
+
+def _extract_task_from_cmd(cmd):
+    """Extract task description from claude command line as fallback."""
+    m = re.search(r'-p\s+"([^"]+)"', cmd)
+    if m:
+        return m.group(1)[:120]
+    m = re.search(r"-p\s+'([^']+)'", cmd)
+    if m:
+        return m.group(1)[:120]
+    return ""
+
+
 def _parse_claude_processes(raw):
     """Parse structured claude process output into a list of process dicts."""
     procs = []
@@ -384,7 +531,15 @@ def get_crib_status():
     )
     claude_raw = _run_ssh(claude_script, timeout=15)
     procs = _parse_claude_processes(claude_raw)
+    # Enrich with JSONL conversation data (task name + activity feed)
     if procs:
+        jsonl_data = _get_jsonl_data()
+        if jsonl_data:
+            procs[0]["task_name"] = jsonl_data.get("task", "")
+            procs[0]["activities"] = jsonl_data.get("activities", [])
+        for p in procs:
+            if not p.get("task_name"):
+                p["task_name"] = _extract_task_from_cmd(p.get("cmd", ""))
         status["claude_processes"] = {"running": True, "count": len(procs), "processes": procs}
     else:
         status["claude_processes"] = {"running": False, "count": 0, "processes": []}
@@ -409,7 +564,7 @@ STATUS_DASHBOARD_CSS = """
 .pct-bar { background: var(--bg); border-radius: 4px; height: 8px; margin-top: 4px; }
 .pct-fill { height: 100%; border-radius: 4px; background: var(--accent); }
 .proc-details { margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-.proc-details summary { padding: 8px 12px; cursor: pointer; font-size: 0.85em; color: var(--fg);
+.proc-details summary { padding: 10px 14px; cursor: pointer; color: var(--fg);
                          background: var(--bg); list-style: none; }
 .proc-details summary::-webkit-details-marker { display: none; }
 .proc-details summary::before { content: '\u25b6 '; font-size: 0.7em; }
@@ -417,9 +572,18 @@ STATUS_DASHBOARD_CSS = """
 .proc-info { padding: 8px 12px; font-size: 0.82em; }
 .proc-cmd { color: var(--dim); word-break: break-all; margin-bottom: 4px; }
 .proc-log-path { color: var(--dim); font-size: 0.9em; margin-bottom: 6px; }
-.proc-log-tail { background: var(--bg); padding: 8px; border-radius: 4px; font-size: 0.85em;
-                  overflow-x: auto; margin: 0; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
+.proc-log-tail { background: #0d1117; padding: 10px 14px; border-radius: 6px; font-size: 0.82em;
+                  overflow-x: auto; margin: 0; border: 1px solid var(--border); white-space: pre-wrap;
+                  word-break: break-all; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+                  line-height: 1.6; color: #8b949e; }
 .proc-none { color: var(--dim); font-size: 0.85em; padding: 8px 0; font-style: italic; }
+.proc-task { font-weight: 600; color: var(--fg); display: block; margin-bottom: 2px;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proc-stats { font-size: 0.8em; color: var(--dim); }
+.proc-activity { background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+                 padding: 10px 14px; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+                 font-size: 0.82em; line-height: 1.8; overflow-x: auto; }
+.activity-line { white-space: nowrap; color: #8b949e; }
 """
 
 
@@ -473,17 +637,27 @@ def _render_host_card(data):
                 cpu = html.escape(p.get("cpu", "?"))
                 mem = html.escape(p.get("mem", "?"))
                 etime = html.escape(p.get("etime", "?"))
-                log = p.get("log", "")
-                log_display = os.path.basename(log) if log else ""
-                tail = p.get("log_tail", [])
-                h += f'<details class="proc-details" open><summary>PID {pid} — CPU {cpu}% · MEM {mem}% · up {etime}</summary>'
+                task_name = html.escape(p.get("task_name", ""))
+                activities = p.get("activities", [])
+                header = task_name if task_name else f"PID {pid}"
+                h += f'<details class="proc-details" open>'
+                h += f'<summary><span class="proc-task">{header}</span>'
+                h += f'<span class="proc-stats">CPU {cpu}% · MEM {mem}% · up {etime}'
+                if task_name:
+                    h += f' · PID {pid}'
+                h += '</span></summary>'
                 h += '<div class="proc-info">'
-                if log_display:
-                    h += f'<div class="proc-log-path">Debug: {html.escape(log_display)}</div>'
-                if tail:
-                    h += '<pre class="proc-log-tail">' + html.escape('\n'.join(tail)) + '</pre>'
+                if activities:
+                    h += '<div class="proc-activity">'
+                    for a in activities:
+                        h += f'<div class="activity-line">{html.escape(a)}</div>'
+                    h += '</div>'
                 else:
-                    h += '<div class="proc-none">No log output yet</div>'
+                    tail = p.get("log_tail", [])
+                    if tail:
+                        h += '<pre class="proc-log-tail">' + html.escape('\n'.join(tail)) + '</pre>'
+                    else:
+                        h += '<div class="proc-none">No activity yet</div>'
                 h += '</div></details>'
         elif not running:
             h += '<div class="proc-none">No active tasks</div>'
@@ -542,12 +716,26 @@ def render_status_page(pi5, crib):
         for (var i = 0; i < procs.length; i++) {
           var p = procs[i];
           var esc = function(s) { return (s||'?').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
-          h += '<details class="proc-details" open><summary>PID ' + esc(p.pid) + ' \u2014 CPU ' + esc(p.cpu) + '% \u00b7 MEM ' + esc(p.mem) + '% \u00b7 up ' + esc(p.etime) + '</summary>';
+          var taskName = p.task_name || '';
+          var activities = p.activities || [];
+          var header = taskName ? esc(taskName) : ('PID ' + esc(p.pid));
+          h += '<details class="proc-details" open>';
+          h += '<summary><span class="proc-task">' + header + '</span>';
+          h += '<span class="proc-stats">CPU ' + esc(p.cpu) + '% \u00b7 MEM ' + esc(p.mem) + '% \u00b7 up ' + esc(p.etime);
+          if (taskName) h += ' \u00b7 PID ' + esc(p.pid);
+          h += '</span></summary>';
           h += '<div class="proc-info">';
-          if (p.log) { var logName = p.log.split('/').pop(); h += '<div class="proc-log-path">Debug: ' + esc(logName) + '</div>'; }
-          var tail = p.log_tail || [];
-          if (tail.length > 0) h += '<pre class="proc-log-tail">' + tail.map(esc).join('\n') + '</pre>';
-          else h += '<div class="proc-none">No log output yet</div>';
+          if (activities.length > 0) {
+            h += '<div class="proc-activity">';
+            for (var j = 0; j < activities.length; j++) {
+              h += '<div class="activity-line">' + esc(activities[j]) + '</div>';
+            }
+            h += '</div>';
+          } else {
+            var tail = p.log_tail || [];
+            if (tail.length > 0) h += '<pre class="proc-log-tail">' + tail.map(esc).join('\n') + '</pre>';
+            else h += '<div class="proc-none">No activity yet</div>';
+          }
           h += '</div></details>';
         }
       } else if (!cp.running) {
