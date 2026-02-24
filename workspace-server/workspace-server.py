@@ -33,8 +33,6 @@ def parse_table_row(line):
     return [cell.strip() for cell in line.split('|')]
 
 def md_to_html(text):
-    # Convert raw URLs to clickable links with target="_blank" (before any processing)
-    text = re.sub(r'(https?://[^\s<>\"\)]+)', r'<a href="\1" target="_blank">\1</a>', text)
     lines = text.split('\n')
     out = []
     in_code = False
@@ -153,18 +151,24 @@ def md_to_html(text):
     return '\n'.join(out)
 
 def inline_format(text):
-    # First convert URLs to placeholder to avoid escaping
-    urls = {}
+    # First convert URLs and markdown links to placeholders to avoid html.escape mangling them
+    placeholders = {}
+    def save_md_link(m):
+        idx = f'__MDLINK{len(placeholders)}__'
+        placeholders[idx] = f'<a href="{m.group(2)}" target="_blank">{html.escape(m.group(1))}</a>'
+        return idx
+    # Save markdown links [text](url) first so URLs inside aren't caught by bare URL regex
+    text = re.sub(r'\[(.+?)\]\((https?://[^\s\)]+)\)', save_md_link, text)
     def save_url(m):
-        idx = f'__URL{len(urls)}__'
-        urls[idx] = m.group(0)
+        idx = f'__URL{len(placeholders)}__'
+        url = m.group(0)
+        placeholders[idx] = f'<a href="{url}" target="_blank">{html.escape(url)}</a>'
         return idx
     text = re.sub(r'https?://[^\s<>\)]+', save_url, text)
     text = html.escape(text)
-    # Now restore URLs as clickable links with target="_blank"
-    for idx, url in urls.items():
-        text = text.replace(idx, url)
-    text = re.sub(r'<a href="(https?://[^\s<">\)"]+)">(https?://[^\s<">\)"]+)</a>', r'<a href="\1" target="_blank">\2</a>', text)
+    # Restore all placeholders (already contain safe HTML)
+    for idx, replacement in placeholders.items():
+        text = text.replace(idx, replacement)
     # Bold
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
