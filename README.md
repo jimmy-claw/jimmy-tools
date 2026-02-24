@@ -81,13 +81,16 @@ Remote code execution delegation system — spawns Claude Code on Crib and monit
    ```bash
    ./coding-agent/run-claude-code.sh 192.168.0.152 "Fix the auth bug in server.py" 100
    ```
-3. Monitor progress from Pi5:
+3. A `.meta.json` file is written alongside the log with task name, start time, PID, and max turns
+4. Monitor progress from Pi5:
    ```bash
    ./coding-agent/monitor-claude.sh 192.168.0.152 task.log watch
    ```
-4. Brain reads results from the log and decides next steps
+5. Brain reads results from the log and decides next steps
 
-**Key lessons** (documented in `CLAUDE-CODE-EXPERIMENT.md`):
+**Task metadata:** Each launched task gets a `.meta.json` file (e.g. `my-task.meta.json`) containing the task name (first sentence of prompt), ISO start timestamp, PID, and max turns. This metadata is picked up by `status-check.sh` and displayed in the workspace server dashboard with task name, start time, and running duration.
+
+**Key lessons** (documented in `ARCHITECTURE.md`):
 - Default 15 max turns is too low — use 100+ for complex tasks
 - `--dangerously-skip-permissions` required for non-interactive mode
 - Better prompts (with file paths, expected outcomes) produce better results

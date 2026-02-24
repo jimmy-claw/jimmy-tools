@@ -55,15 +55,32 @@ Sonnet (via OpenClaw) acts as the "brain" for planning and conversation, while C
 - `run-claude-code.sh` — Spawn Claude Code on remote host via SSH with nohup
   - `--replace` flag to kill existing processes first
   - Default: runs alongside existing processes
+  - Writes a `.meta.json` file alongside the log with task metadata
 - `monitor-claude.sh` — Monitor running Claude Code processes (terminal)
 - `setup-coding-agent.sh` — Bootstrap a new device for coding agent
 - `status-check.sh` — Gather process status, write JSON (run by systemd timer)
+  - Includes `.meta.json` metadata when available
+
+### Task Metadata
+When `run-claude-code.sh` launches a task, it writes a `.meta.json` file alongside the log:
+```json
+{
+  "name": "Fix the auth bug in server.py",
+  "started": "2026-02-24T12:00:00Z",
+  "log_file": "/home/jimmy/my-task.log",
+  "max_turns": 100,
+  "pid": 12345
+}
+```
+- File naming: `<log-basename>.meta.json` (e.g. `my-task.log` → `my-task.meta.json`)
+- Task name is extracted from the first sentence of the prompt
+- Used by `status-check.sh` and the workspace server dashboard for richer display
 
 ### Status Monitoring Flow
 1. **systemd timer** runs `status-check.sh` every 60s on Crib
-2. `status-check.sh` finds claude processes, reads their log tails, writes `~/coding-agent-status.json`
-3. **Workspace server** on Pi5 reads this JSON via SSH (or queries processes directly via SSH)
-4. **/status** dashboard renders process cards with CPU, memory, runtime, and last 5 log lines
+2. `status-check.sh` finds claude processes, reads their log tails, merges `.meta.json` metadata, writes `~/coding-agent-status.json`
+3. **Workspace server** on Pi5 reads this JSON via SSH (or queries processes directly via SSH, including `.meta.json` files)
+4. **/status** dashboard renders process cards with task name, start time, running duration, CPU, memory, and last 5 activities
 5. Dashboard auto-refreshes every 30s via JavaScript fetch to `/system-status`
 
 ### systemd Units (install on Crib)

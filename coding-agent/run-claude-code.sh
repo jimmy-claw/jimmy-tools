@@ -50,6 +50,12 @@ if [ "$REPLACE" = true ]; then
     sleep 1
 fi
 
+# Extract task name from first meaningful sentence of prompt
+TASK_NAME=$(printf '%s' "$PROMPT" | tr '\n' ' ' | sed 's/^[[:space:]]*//' | sed 's/\([.!?]\) .*/\1/' | head -c 120)
+
+# Derive meta file path from log file (e.g. my-task.log -> my-task.meta.json)
+META_FILE="${LOG_FILE%.log}.meta.json"
+
 # Start Claude Code with --dangerously-skip-permissions (required for non-interactive)
 # Use nohup to survive SSH disconnect
 ssh $SSH_OPTS "$HOST" "
@@ -60,8 +66,21 @@ ssh $SSH_OPTS "$HOST" "
         --max-turns $MAX_TURNS \
         > ~/$LOG_FILE 2>&1 &
 
-    echo \"Claude Code started in background, PID: \$!\"
+    CLAUDE_PID=\$!
+    echo \"Claude Code started in background, PID: \$CLAUDE_PID\"
     echo \"Log: ~/$LOG_FILE\"
+
+    # Write task metadata file
+    cat > ~/$META_FILE <<METAEOF
+{
+  \"name\": \"$(printf '%s' "$TASK_NAME" | sed 's/"/\\\\"/g')\",
+  \"started\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+  \"log_file\": \"$HOME/$LOG_FILE\",
+  \"max_turns\": $MAX_TURNS,
+  \"pid\": \$CLAUDE_PID
+}
+METAEOF
+    echo \"Metadata: ~/$META_FILE\"
 "
 
 echo ""
@@ -70,6 +89,9 @@ echo "  ./monitor-claude.sh $HOST $LOG_FILE"
 echo ""
 echo "Or continuous watch:"
 echo "  ./monitor-claude.sh $HOST $LOG_FILE watch"
+echo ""
+echo "Metadata file:"
+echo "  ~/$META_FILE"
 echo ""
 echo "To kill:"
 echo "  ssh $HOST 'pkill -f \"claude -p\"'"

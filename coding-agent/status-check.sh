@@ -51,6 +51,22 @@ def get_claude_processes():
         except Exception:
             pass
 
+        # Look for .meta.json matching this process
+        metadata = {}
+        try:
+            # Search for meta files in home directory
+            home = os.path.expanduser("~")
+            for fname in os.listdir(home):
+                if fname.endswith(".meta.json"):
+                    mpath = os.path.join(home, fname)
+                    with open(mpath) as mf:
+                        meta = json.load(mf)
+                    if meta.get("pid") == pid:
+                        metadata = meta
+                        break
+        except Exception:
+            pass
+
         procs.append({
             "pid": pid,
             "cpu": cpu,
@@ -59,6 +75,7 @@ def get_claude_processes():
             "cmd": cmd,
             "log": logfile,
             "log_tail": log_tail,
+            "metadata": metadata,
         })
     return procs
 

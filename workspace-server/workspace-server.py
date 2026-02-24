@@ -507,6 +507,36 @@ def _parse_claude_processes(raw):
     return procs
 
 
+def _get_meta_files():
+    """Fetch all .meta.json files from crib via SSH, returned as {pid: metadata_dict}."""
+    meta_script = (
+        'for f in ~/*.meta.json; do '
+        '  [ -f "$f" ] || continue; '
+        '  echo "---META---"; '
+        '  cat "$f" 2>/dev/null; '
+        'done'
+    )
+    try:
+        raw = _run_ssh(meta_script, timeout=10)
+        if not raw or raw.startswith("error:"):
+            return {}
+        result = {}
+        for block in raw.split("---META---"):
+            block = block.strip()
+            if not block:
+                continue
+            try:
+                meta = json.loads(block)
+                pid = meta.get("pid")
+                if pid is not None:
+                    result[str(pid)] = meta
+            except (json.JSONDecodeError, Exception):
+                continue
+        return result
+    except Exception:
+        return {}
+
+
 def get_crib_status():
     """Gather crib (192.168.0.152) system status via SSH."""
     status = {"host": "Crib", "ts": datetime.now().isoformat()}
@@ -541,10 +571,22 @@ def get_crib_status():
     # Enrich with JSONL conversation data (task name + activity feed)
     if procs:
         jsonl_data = _get_jsonl_data()
+        meta_files = _get_meta_files()
         if jsonl_data:
             procs[0]["task_name"] = jsonl_data.get("task", "")
             procs[0]["activities"] = jsonl_data.get("activities", [])
+        # Enrich with .meta.json data (task name, start time)
         for p in procs:
+            pid_str = p.get("pid", "")
+            meta = meta_files.get(pid_str, {})
+            if meta:
+                p["meta"] = meta
+                if not p.get("task_name") and meta.get("name"):
+                    p["task_name"] = meta["name"]
+                if meta.get("started"):
+                    p["started"] = meta["started"]
+                if meta.get("max_turns"):
+                    p["max_turns"] = meta["max_turns"]
             if not p.get("task_name"):
                 p["task_name"] = _extract_task_from_cmd(p.get("cmd", ""))
         status["claude_processes"] = {"running": True, "count": len(procs), "processes": procs}
@@ -591,6 +633,7 @@ STATUS_DASHBOARD_CSS = """
                  padding: 10px 14px; font-family: 'JetBrains Mono', 'Fira Code', monospace;
                  font-size: 0.82em; line-height: 1.8; overflow-x: auto; }
 .activity-line { white-space: nowrap; color: #8b949e; }
+.proc-start-time { color: var(--dim); font-size: 0.85em; padding: 4px 0 8px 0; font-style: italic; }
 """
 
 
@@ -645,6 +688,8 @@ def _render_host_card(data):
                 mem = html.escape(p.get("mem", "?"))
                 etime = html.escape(p.get("etime", "?"))
                 task_name = html.escape(p.get("task_name", ""))
+                started = p.get("started", "")
+                max_turns = p.get("max_turns", "")
                 activities = p.get("activities", [])
                 header = task_name if task_name else f"PID {pid}"
                 h += f'<details class="proc-details" open>'
@@ -652,8 +697,29 @@ def _render_host_card(data):
                 h += f'<span class="proc-stats">CPU {cpu}% · MEM {mem}% · up {etime}'
                 if task_name:
                     h += f' · PID {pid}'
+                if max_turns:
+                    h += f' · max {html.escape(str(max_turns))} turns'
                 h += '</span></summary>'
                 h += '<div class="proc-info">'
+                if started:
+                    # Calculate running duration from start time
+                    try:
+                        start_dt = datetime.fromisoformat(started.replace('Z', '+00:00'))
+                        from datetime import timezone
+                        now_utc = datetime.now(timezone.utc)
+                        delta = now_utc - start_dt
+                        hours, remainder = divmod(int(delta.total_seconds()), 3600)
+                        minutes, secs = divmod(remainder, 60)
+                        if hours > 0:
+                            duration_str = f"{hours}h {minutes}m"
+                        elif minutes > 0:
+                            duration_str = f"{minutes}m {secs}s"
+                        else:
+                            duration_str = f"{secs}s"
+                        start_display = start_dt.strftime("%H:%M:%S UTC")
+                        h += f'<div class="proc-start-time">Started {html.escape(start_display)} · Running for {html.escape(duration_str)}</div>'
+                    except Exception:
+                        h += f'<div class="proc-start-time">Started {html.escape(started)}</div>'
                 if activities:
                     h += '<div class="proc-activity">'
                     for a in activities:
@@ -724,13 +790,32 @@ def render_status_page(pi5, crib):
           var p = procs[i];
           var taskName = p.task_name || '';
           var activities = p.activities || [];
+          var started = p.started || '';
+          var maxTurns = p.max_turns || '';
           var header = taskName ? esc(taskName) : ('PID ' + esc(p.pid));
           h += '<details class="proc-details" open>';
           h += '<summary><span class="proc-task">' + header + '</span>';
           h += '<span class="proc-stats">CPU ' + esc(p.cpu) + '% \u00b7 MEM ' + esc(p.mem) + '% \u00b7 up ' + esc(p.etime);
           if (taskName) h += ' \u00b7 PID ' + esc(p.pid);
+          if (maxTurns) h += ' \u00b7 max ' + esc(maxTurns) + ' turns';
           h += '</span></summary>';
           h += '<div class="proc-info">';
+          if (started) {
+            try {
+              var startDate = new Date(started);
+              var now = new Date();
+              var diffMs = now - startDate;
+              var diffS = Math.floor(diffMs / 1000);
+              var hrs = Math.floor(diffS / 3600);
+              var mins = Math.floor((diffS % 3600) / 60);
+              var secs = diffS % 60;
+              var dur = hrs > 0 ? (hrs + 'h ' + mins + 'm') : (mins > 0 ? (mins + 'm ' + secs + 's') : (secs + 's'));
+              var timeStr = startDate.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+              h += '<div class="proc-start-time">Started ' + esc(timeStr) + ' \u00b7 Running for ' + esc(dur) + '</div>';
+            } catch(e) {
+              h += '<div class="proc-start-time">Started ' + esc(started) + '</div>';
+            }
+          }
           if (activities.length > 0) {
             h += '<div class="proc-activity">';
             for (var j = 0; j < activities.length; j++) {
