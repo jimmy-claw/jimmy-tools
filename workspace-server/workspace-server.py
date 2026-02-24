@@ -10,6 +10,7 @@ import html
 import json
 import subprocess
 import mimetypes
+from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, quote
@@ -370,6 +371,7 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
             
             href = f"{url_path}/{name}".replace('//', '/')
             size = ''
+            mtime = ''
             if entry.is_file():
                 sz = entry.stat().st_size
                 if sz < 1024:
@@ -378,10 +380,22 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
                     size = f'{sz//1024}KB'
                 else:
                     size = f'{sz//(1024*1024)}MB'
+                # Format mtime as relative or absolute
+                mt = datetime.fromtimestamp(entry.stat().st_mtime)
+                now = datetime.now()
+                diff = now - mt
+                if diff.days == 0:
+                    mtime = mt.strftime('%H:%M')
+                elif diff.days == 1:
+                    mtime = 'yesterday'
+                elif diff.days < 7:
+                    mtime = f'{diff.days}d ago'
+                else:
+                    mtime = mt.strftime('%b %d')
             
             items.append(f'<li><span class="icon">{icon}</span>'
                         f'<a href="{quote(href)}">{html.escape(name)}</a>'
-                        f'<span class="file-meta">{size}</span></li>')
+                        f'<span class="file-meta">{mtime} {size}</span></li>')
         
         body = f'<h1>{html.escape(url_path or "workspace")}</h1>\n'
         body += f'<ul class="dir-list">{"".join(items)}</ul>'
