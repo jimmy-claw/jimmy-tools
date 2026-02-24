@@ -192,6 +192,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }
 .dir-list li:hover { background: var(--card); }
 .dir-list .icon { margin-right: 8px; }
 .file-meta { color: var(--dim); font-size: 0.85em; float: right; }
+.sort-bar { background: var(--card); padding: 8px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 0.9em; color: var(--dim); }
+.sort-bar a { color: var(--accent); margin: 0 4px; }
+.sort-bar a:hover { text-decoration: underline; }
 .nav { background: var(--card); padding: 12px 20px; border-radius: 8px;
        margin-bottom: 20px; border: 1px solid var(--border); }
 .nav a { margin-right: 16px; }
@@ -246,6 +249,23 @@ def page(title, body, path='/'):
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>hljs.highlightAll();</script>
+<script>
+let sortCol = 'mtime', sortAsc = false;
+function sortDir(e, col) {{
+  e.preventDefault();
+  if (sortCol === col) {{ sortAsc = !sortAsc; }} 
+  else {{ sortCol = col; sortAsc = false; }}
+  document.getElementById('sort-dir').textContent = sortAsc ? '↑' : '↓';
+  const ul = document.querySelector('.dir-list');
+  const lis = Array.from(ul.querySelectorAll('li'));
+  lis.sort((a, b) => {{
+    let av = a.dataset[sortCol], bv = b.dataset[sortCol];
+    if (sortCol === 'name') {{ av = av.toLowerCase(); bv = bv.toLowerCase(); return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av); }}
+    return sortAsc ? av - bv : bv - av;
+  }});
+  lis.forEach(li => ul.appendChild(li));
+}}
+</script>
 </head><body>
 <div class="nav">🦞 <strong>Jimmy's Workspace</strong> &nbsp;|&nbsp;
 <a href="/">Home</a> <a href="/research">Research</a> <a href="/memory">Memory</a>
@@ -393,11 +413,17 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
                 else:
                     mtime = mt.strftime('%b %d')
             
-            items.append(f'<li><span class="icon">{icon}</span>'
+            items.append(f'<li data-name="{html.escape(name)}" data-size="{sz if entry.is_file() else 0}" data-mtime="{entry.stat().st_mtime if entry.is_file() else 0}"><span class="icon">{icon}</span>'
                         f'<a href="{quote(href)}">{html.escape(name)}</a>'
                         f'<span class="file-meta">{mtime} {size}</span></li>')
         
         body = f'<h1>{html.escape(url_path or "workspace")}</h1>\n'
+        body += """<div class="sort-bar"><span>Sort by:</span> 
+<a href="#" onclick="sortDir(event, 'name')">Name</a> | 
+<a href="#" onclick="sortDir(event, 'size')">Size</a> | 
+<a href="#" onclick="sortDir(event, 'mtime')">Modified</a> |
+<span id="sort-dir">↓</span></div>
+"""
         body += f'<ul class="dir-list">{"".join(items)}</ul>'
         
         if readme:
