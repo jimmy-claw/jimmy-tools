@@ -338,15 +338,17 @@ def get_crib_status():
     status["memory"] = _parse_memory(_run_ssh("free -h"))
     status["disk"] = _parse_disk(_run_ssh("df -h /"))
 
-    # Claude processes — gather detailed info per process
+    # Claude processes — gather detailed info per process (skip bash wrappers)
     claude_script = (
         'for pid in $(pgrep -f "claud[e]" 2>/dev/null); do '
+        '  cmd=$(ps -o args= -p $pid 2>/dev/null); '
+        '  case "$cmd" in "bash "*|"/bin/bash "*) continue;; esac; '
         '  echo "---PROC---"; '
         '  echo "PID:$pid"; '
         '  echo "CPU:$(ps -o %cpu= -p $pid 2>/dev/null)"; '
         '  echo "MEM:$(ps -o %mem= -p $pid 2>/dev/null)"; '
         '  echo "ETIME:$(ps -o etime= -p $pid 2>/dev/null)"; '
-        '  echo "CMD:$(ps -o args= -p $pid 2>/dev/null)"; '
+        '  echo "CMD:$cmd"; '
         '  logfile=$(readlink /proc/$pid/fd/1 2>/dev/null); '
         '  echo "LOG:$logfile"; '
         '  if [ -n "$logfile" ] && [ -f "$logfile" ]; then '
@@ -447,15 +449,16 @@ def _render_host_card(data):
                 cpu = html.escape(p.get("cpu", "?"))
                 mem = html.escape(p.get("mem", "?"))
                 etime = html.escape(p.get("etime", "?"))
-                cmd = html.escape(p.get("cmd", "?"))
                 log = html.escape(p.get("log", ""))
                 tail = p.get("log_tail", [])
-                h += f'<details class="proc-details"><summary>PID {pid} — CPU {cpu}% · MEM {mem}% · up {etime}</summary>'
-                h += f'<div class="proc-info"><div class="proc-cmd">{cmd}</div>'
+                h += f'<details class="proc-details" open><summary>PID {pid} — CPU {cpu}% · MEM {mem}% · up {etime}</summary>'
+                h += '<div class="proc-info">'
                 if log:
                     h += f'<div class="proc-log-path">Log: {log}</div>'
                 if tail:
                     h += '<pre class="proc-log-tail">' + html.escape('\n'.join(tail)) + '</pre>'
+                else:
+                    h += '<div class="proc-none">No log output yet</div>'
                 h += '</div></details>'
         elif not running:
             h += '<div class="proc-none">No active tasks</div>'
@@ -514,11 +517,12 @@ def render_status_page(pi5, crib):
         for (var i = 0; i < procs.length; i++) {
           var p = procs[i];
           var esc = function(s) { return (s||'?').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
-          h += '<details class="proc-details"><summary>PID ' + esc(p.pid) + ' \u2014 CPU ' + esc(p.cpu) + '% \u00b7 MEM ' + esc(p.mem) + '% \u00b7 up ' + esc(p.etime) + '</summary>';
-          h += '<div class="proc-info"><div class="proc-cmd">' + esc(p.cmd) + '</div>';
+          h += '<details class="proc-details" open><summary>PID ' + esc(p.pid) + ' \u2014 CPU ' + esc(p.cpu) + '% \u00b7 MEM ' + esc(p.mem) + '% \u00b7 up ' + esc(p.etime) + '</summary>';
+          h += '<div class="proc-info">';
           if (p.log) h += '<div class="proc-log-path">Log: ' + esc(p.log) + '</div>';
           var tail = p.log_tail || [];
           if (tail.length > 0) h += '<pre class="proc-log-tail">' + esc(tail.join('\\n')) + '</pre>';
+          else h += '<div class="proc-none">No log output yet</div>';
           h += '</div></details>';
         }
       } else if (!cp.running) {
