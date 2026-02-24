@@ -518,7 +518,7 @@ def render_status_page(pi5, crib):
           h += '<div class="proc-info"><div class="proc-cmd">' + esc(p.cmd) + '</div>';
           if (p.log) h += '<div class="proc-log-path">Log: ' + esc(p.log) + '</div>';
           var tail = p.log_tail || [];
-          if (tail.length > 0) h += '<pre class="proc-log-tail">' + esc(tail.join('\n')) + '</pre>';
+          if (tail.length > 0) h += '<pre class="proc-log-tail">' + esc(tail.join('\\n')) + '</pre>';
           h += '</div></details>';
         }
       } else if (!cp.running) {
