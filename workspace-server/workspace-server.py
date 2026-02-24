@@ -4,7 +4,6 @@ Zero external dependencies — uses only Python stdlib.
 Serves the OpenClaw workspace directory with directory listings and markdown preview.
 """
 
-import os
 import re
 import html
 import json
@@ -189,8 +188,6 @@ def inline_format(text):
     text = re.sub(r'`(.+?)`', r'<code class="inline">\1</code>', text)
     # Links
     text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2" target="_blank">\1</a>', text)
-    # Emoji shortcodes (common ones)
-    emojis = {'🔴': '🔴', '🟡': '🟡', '🟢': '🟢', '📝': '📝'}
     return text
 
 CSS = """
@@ -972,11 +969,10 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
                         highlighted = html.escape(line).replace(
                             html.escape(query), f'<mark style="background:var(--accent);color:var(--bg)">{html.escape(query)}</mark>')
                         # case-insensitive highlight
-                        import re as _re
-                        highlighted = _re.sub(
-                            _re.escape(html.escape(query)),
+                        highlighted = re.sub(
+                            re.escape(html.escape(query)),
                             f'<mark style="background:var(--accent);color:var(--bg)">{html.escape(query)}</mark>',
-                            html.escape(line), flags=_re.IGNORECASE)
+                            html.escape(line), flags=re.IGNORECASE)
                         body += f'<li><span style="color:var(--dim)">L{lineno}:</span> {highlighted}</li>'
                     if len(matches) > 5:
                         body += f'<li style="color:var(--dim)">...and {len(matches)-5} more matches</li>'
