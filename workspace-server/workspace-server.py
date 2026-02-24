@@ -17,6 +17,8 @@ from urllib.parse import unquote, quote
 
 WORKSPACE = Path("/home/vpavlin/.openclaw/workspace")
 PORT = 8888
+CRIB_HOST = "jimmy@192.168.0.152"
+SSH_OPTS = ['-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=5']
 
 # Simple markdown-to-HTML (covers 90% of common markdown)
 def is_table_separator(line):
@@ -223,6 +225,185 @@ tr:nth-child(even) { background: rgba(36, 40, 59, 0.5); }
 tr:hover { background: var(--card); }
 """
 
+def _run_local(cmd, timeout=5):
+    """Run a local command, return stdout or error string."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip() if r.returncode == 0 else f"error: {r.stderr.strip()}"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def _run_ssh(cmd_str, timeout=10):
+    """Run a command on crib via SSH, return stdout or error string."""
+    try:
+        r = subprocess.run(
+            ['ssh'] + SSH_OPTS + [CRIB_HOST, cmd_str],
+            capture_output=True, text=True, timeout=timeout
+        )
+        return r.stdout.strip() if r.returncode == 0 else f"error: {r.stderr.strip()}"
+    except Exception as e:
+        return f"error: {e}"
+
+
+def _parse_uptime(raw):
+    """Extract uptime string and load averages from `uptime` output."""
+    info = {"raw": raw}
+    m = re.search(r'up\s+(.+?),\s+\d+\s+user', raw)
+    if m:
+        info["uptime"] = m.group(1).strip()
+    m = re.search(r'load average:\s*(.+)', raw)
+    if m:
+        info["load_avg"] = m.group(1).strip()
+    return info
+
+
+def _parse_memory(raw):
+    """Parse `free -h` output into dict."""
+    info = {"raw": raw}
+    for line in raw.splitlines():
+        if line.startswith("Mem:"):
+            parts = line.split()
+            info["total"] = parts[1]
+            info["used"] = parts[2]
+            info["available"] = parts[6] if len(parts) > 6 else parts[3]
+    return info
+
+
+def _parse_disk(raw):
+    """Parse `df -h /` output into dict."""
+    info = {"raw": raw}
+    lines = raw.strip().splitlines()
+    if len(lines) >= 2:
+        parts = lines[1].split()
+        info["total"] = parts[1]
+        info["used"] = parts[2]
+        info["available"] = parts[3]
+        info["use_pct"] = parts[4]
+    return info
+
+
+def get_pi5_status():
+    """Gather local Pi5 system status."""
+    status = {"host": "Pi5", "ts": datetime.now().isoformat()}
+    status["uptime"] = _parse_uptime(_run_local(["uptime"]))
+    status["memory"] = _parse_memory(_run_local(["free", "-h"]))
+    status["disk"] = _parse_disk(_run_local(["df", "-h", "/"]))
+
+    # OpenClaw gateway status
+    gw = _run_local(["pgrep", "-fa", "openclaw"])
+    if gw.startswith("error:") or not gw:
+        status["openclaw_gateway"] = {"running": False, "detail": gw or "not found"}
+    else:
+        status["openclaw_gateway"] = {"running": True, "detail": gw}
+
+    return status
+
+
+def get_crib_status():
+    """Gather crib (192.168.0.152) system status via SSH."""
+    status = {"host": "Crib", "ts": datetime.now().isoformat()}
+    status["uptime"] = _parse_uptime(_run_ssh("uptime"))
+    status["memory"] = _parse_memory(_run_ssh("free -h"))
+    status["disk"] = _parse_disk(_run_ssh("df -h /"))
+
+    # Claude processes
+    claude = _run_ssh("ps aux | grep -i claud[e]")
+    if claude.startswith("error:") or not claude:
+        status["claude_processes"] = {"running": False, "detail": claude or "none found"}
+    else:
+        procs = [l for l in claude.splitlines() if l.strip()]
+        status["claude_processes"] = {"running": True, "count": len(procs), "detail": claude}
+
+    return status
+
+
+STATUS_DASHBOARD_CSS = """
+.status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+@media (max-width: 800px) { .status-grid { grid-template-columns: 1fr; } }
+.host-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+.host-card h2 { margin-top: 0; font-size: 1.3em; }
+.stat-row { display: flex; justify-content: space-between; padding: 8px 0;
+            border-bottom: 1px solid var(--border); font-size: 0.9em; }
+.stat-row:last-child { border-bottom: none; }
+.stat-label { color: var(--dim); }
+.stat-value { text-align: right; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
+.badge-up { background: rgba(158,206,106,0.2); color: var(--green); }
+.badge-down { background: rgba(247,118,142,0.2); color: var(--red); }
+.refresh-note { color: var(--dim); font-size: 0.8em; text-align: center; margin-top: 16px; }
+.pct-bar { background: var(--bg); border-radius: 4px; height: 8px; margin-top: 4px; }
+.pct-fill { height: 100%; border-radius: 4px; background: var(--accent); }
+"""
+
+
+def _render_host_card(data):
+    """Render one host card as HTML."""
+    host = html.escape(data.get("host", "?"))
+    h = f'<div class="host-card"><h2>{host}</h2>'
+
+    # Uptime + load
+    up = data.get("uptime", {})
+    uptime_str = html.escape(up.get("uptime", up.get("raw", "?")))
+    load_str = html.escape(up.get("load_avg", "?"))
+    h += f'<div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value">{uptime_str}</span></div>'
+    h += f'<div class="stat-row"><span class="stat-label">Load Avg</span><span class="stat-value">{load_str}</span></div>'
+
+    # Memory
+    mem = data.get("memory", {})
+    mem_str = f'{html.escape(mem.get("used", "?"))} / {html.escape(mem.get("total", "?"))}'
+    h += f'<div class="stat-row"><span class="stat-label">Memory</span><span class="stat-value">{mem_str}</span></div>'
+
+    # Disk
+    disk = data.get("disk", {})
+    disk_str = f'{html.escape(disk.get("used", "?"))} / {html.escape(disk.get("total", "?"))}'
+    pct = disk.get("use_pct", "0%")
+    pct_num = int(pct.replace('%', '')) if pct.replace('%', '').isdigit() else 0
+    bar_color = 'var(--green)' if pct_num < 70 else ('var(--accent)' if pct_num < 90 else 'var(--red)')
+    h += f'<div class="stat-row"><span class="stat-label">Disk</span><span class="stat-value">{disk_str} ({html.escape(pct)})</span></div>'
+    h += f'<div class="pct-bar"><div class="pct-fill" style="width:{pct_num}%;background:{bar_color}"></div></div>'
+
+    # Service status (OpenClaw or Claude)
+    if "openclaw_gateway" in data:
+        gw = data["openclaw_gateway"]
+        running = gw.get("running", False)
+        badge = '<span class="badge badge-up">RUNNING</span>' if running else '<span class="badge badge-down">STOPPED</span>'
+        h += f'<div class="stat-row"><span class="stat-label">OpenClaw GW</span><span class="stat-value">{badge}</span></div>'
+
+    if "claude_processes" in data:
+        cp = data["claude_processes"]
+        running = cp.get("running", False)
+        count = cp.get("count", 0)
+        if running:
+            badge = f'<span class="badge badge-up">{count} RUNNING</span>'
+        else:
+            badge = '<span class="badge badge-down">NONE</span>'
+        h += f'<div class="stat-row"><span class="stat-label">Claude Procs</span><span class="stat-value">{badge}</span></div>'
+
+    h += '</div>'
+    return h
+
+
+def render_status_page(pi5, crib):
+    """Build the full status dashboard HTML."""
+    body = '<h1>System Status</h1>'
+    body += f'<div class="status-grid">{_render_host_card(pi5)}{_render_host_card(crib)}</div>'
+    body += '<div class="refresh-note">Auto-refreshes every 30s</div>'
+
+    return f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Status — Jimmy's Workspace</title>
+<style>{CSS}{STATUS_DASHBOARD_CSS}</style>
+<meta http-equiv="refresh" content="30">
+</head><body>
+<div class="nav">🦞 <strong>Jimmy's Workspace</strong> &nbsp;|&nbsp;
+<a href="/">Home</a> <a href="/status">Status</a>
+<a href="/TODO.md">TODO</a></div>
+{body}
+</body></html>"""
+
+
 def breadcrumb(path):
     parts = path.strip('/').split('/')
     crumbs = ['<a href="/">🏠 workspace</a>']
@@ -292,7 +473,7 @@ function sortDir(e, col) {{
 </head><body>
 <div class="nav">🦞 <strong>Jimmy's Workspace</strong> &nbsp;|&nbsp;
 <a href="/">Home</a> <a href="/research">Research</a> <a href="/memory">Memory</a>
-<a href="/TODO.md">TODO</a>
+<a href="/status">Status</a> <a href="/TODO.md">TODO</a>
 <form style="display:inline; margin-left:16px" method="GET" action="/search">
 <input name="q" placeholder="Search files..." value="" 
  style="background:var(--bg);color:var(--fg);border:1px solid var(--border);padding:4px 8px;border-radius:4px;width:200px">
@@ -327,7 +508,30 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self.wfile.write(f'{{"error": "{str(e)}"}}'.encode())
             return
-        
+
+        # System status JSON endpoint
+        if path == '/system-status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            try:
+                data = {"pi5": get_pi5_status(), "crib": get_crib_status()}
+            except Exception as e:
+                data = {"error": str(e)}
+            self.wfile.write(json.dumps(data, indent=2).encode())
+            return
+
+        # Status dashboard HTML
+        if path == '/status':
+            try:
+                pi5 = get_pi5_status()
+                crib = get_crib_status()
+            except Exception as e:
+                pi5 = {"host": "Pi5", "error": str(e)}
+                crib = {"host": "Crib", "error": str(e)}
+            self.send_html(render_status_page(pi5, crib))
+            return
+
         # Search handler
         if path.startswith('/search'):
             from urllib.parse import parse_qs, urlparse
