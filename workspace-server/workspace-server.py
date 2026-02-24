@@ -386,21 +386,95 @@ def _render_host_card(data):
 
 def render_status_page(pi5, crib):
     """Build the full status dashboard HTML."""
-    body = '<h1>System Status</h1>'
-    body += f'<div class="status-grid">{_render_host_card(pi5)}{_render_host_card(crib)}</div>'
-    body += '<div class="refresh-note">Auto-refreshes every 30s</div>'
+    body = '<h1>System Status <span id="spinner" style="display:none">⟳</span></h1>'
+    body += f'<div id="status-grid" class="status-grid">{_render_host_card(pi5)}{_render_host_card(crib)}</div>'
+    body += '<div class="refresh-note" id="refresh-note">Last refreshed: just now · Auto-refreshes every 30s</div>'
+
+    status_js = """
+<script>
+(function() {
+  let lastRefreshTime = Date.now();
+  const spinner = document.getElementById('spinner');
+  const grid = document.getElementById('status-grid');
+  const note = document.getElementById('refresh-note');
+
+  function renderHostCard(data) {
+    const host = (data.host || '?').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    let h = '<div class="host-card"><h2>' + host + '</h2>';
+    const up = data.uptime || {};
+    const uptime = (up.uptime || up.raw || '?').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    const load = (up.load_avg || '?').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    h += '<div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value">' + uptime + '</span></div>';
+    h += '<div class="stat-row"><span class="stat-label">Load Avg</span><span class="stat-value">' + load + '</span></div>';
+    const mem = data.memory || {};
+    const memStr = (mem.used || '?') + ' / ' + (mem.total || '?');
+    h += '<div class="stat-row"><span class="stat-label">Memory</span><span class="stat-value">' + memStr + '</span></div>';
+    const disk = data.disk || {};
+    const diskStr = (disk.used || '?') + ' / ' + (disk.total || '?');
+    const pct = disk.use_pct || '0%';
+    const pctNum = parseInt(pct) || 0;
+    const barColor = pctNum < 70 ? 'var(--green)' : (pctNum < 90 ? 'var(--accent)' : 'var(--red)');
+    h += '<div class="stat-row"><span class="stat-label">Disk</span><span class="stat-value">' + diskStr + ' (' + pct + ')</span></div>';
+    h += '<div class="pct-bar"><div class="pct-fill" style="width:' + pctNum + '%;background:' + barColor + '"></div></div>';
+    if (data.openclaw_gateway) {
+      const gw = data.openclaw_gateway;
+      const badge = gw.running
+        ? '<span class="badge badge-up">RUNNING</span>'
+        : '<span class="badge badge-down">STOPPED</span>';
+      h += '<div class="stat-row"><span class="stat-label">OpenClaw GW</span><span class="stat-value">' + badge + '</span></div>';
+    }
+    if (data.claude_processes) {
+      const cp = data.claude_processes;
+      const badge = cp.running
+        ? '<span class="badge badge-up">' + (cp.count || 0) + ' RUNNING</span>'
+        : '<span class="badge badge-down">NONE</span>';
+      h += '<div class="stat-row"><span class="stat-label">Claude Procs</span><span class="stat-value">' + badge + '</span></div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  function refreshStatus() {
+    spinner.style.display = 'inline';
+    fetch('/system-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) return;
+        grid.innerHTML = renderHostCard(data.pi5) + renderHostCard(data.crib);
+        lastRefreshTime = Date.now();
+      })
+      .catch(function() {})
+      .finally(function() { spinner.style.display = 'none'; });
+  }
+
+  function updateCounter() {
+    const secs = Math.floor((Date.now() - lastRefreshTime) / 1000);
+    let ago;
+    if (secs < 5) ago = 'just now';
+    else if (secs < 60) ago = secs + 's ago';
+    else ago = Math.floor(secs / 60) + 'm ' + (secs % 60) + 's ago';
+    note.textContent = 'Last refreshed: ' + ago + ' \\u00b7 Auto-refreshes every 30s';
+  }
+
+  setInterval(refreshStatus, 30000);
+  setInterval(updateCounter, 1000);
+})();
+</script>"""
 
     return f"""<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>System Status — Jimmy's Workspace</title>
-<style>{CSS}{STATUS_DASHBOARD_CSS}</style>
-<meta http-equiv="refresh" content="30">
+<style>{CSS}{STATUS_DASHBOARD_CSS}
+#spinner {{ display: inline-block; animation: spin 1s linear infinite; color: var(--accent); font-size: 0.8em; }}
+@keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
+</style>
 </head><body>
 <div class="nav">🦞 <strong>Jimmy's Workspace</strong> &nbsp;|&nbsp;
 <a href="/">Home</a> <a href="/status">Status</a>
 <a href="/TODO.md">TODO</a></div>
 {body}
+{status_js}
 </body></html>"""
 
 
