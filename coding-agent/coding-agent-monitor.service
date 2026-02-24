@@ -1,0 +1,8 @@
+[Unit]
+Description=Coding Agent Status Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=jimmy
+ExecStart=/home/jimmy/jimmy-tools/coding-agent/status-check.sh
