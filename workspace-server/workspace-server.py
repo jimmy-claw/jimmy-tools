@@ -33,6 +33,8 @@ def parse_table_row(line):
     return [cell.strip() for cell in line.split('|')]
 
 def md_to_html(text):
+    # Convert raw URLs to clickable links with target="_blank" (before any processing)
+    text = re.sub(r'(https?://[^\s<>\"\)]+)', r'<a href="\1" target="_blank">\1</a>', text)
     lines = text.split('\n')
     out = []
     in_code = False
@@ -151,7 +153,18 @@ def md_to_html(text):
     return '\n'.join(out)
 
 def inline_format(text):
+    # First convert URLs to placeholder to avoid escaping
+    urls = {}
+    def save_url(m):
+        idx = f'__URL{len(urls)}__'
+        urls[idx] = m.group(0)
+        return idx
+    text = re.sub(r'https?://[^\s<>\)]+', save_url, text)
     text = html.escape(text)
+    # Now restore URLs as clickable links with target="_blank"
+    for idx, url in urls.items():
+        text = text.replace(idx, url)
+    text = re.sub(r'<a href="(https?://[^\s<">\)"]+)">(https?://[^\s<">\)"]+)</a>', r'<a href="\1" target="_blank">\2</a>', text)
     # Bold
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
@@ -161,7 +174,7 @@ def inline_format(text):
     # Inline code
     text = re.sub(r'`(.+?)`', r'<code class="inline">\1</code>', text)
     # Links
-    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', text)
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2" target="_blank">\1</a>', text)
     # Emoji shortcodes (common ones)
     emojis = {'🔴': '🔴', '🟡': '🟡', '🟢': '🟢', '📝': '📝'}
     return text
@@ -249,6 +262,12 @@ def page(title, body, path='/'):
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>hljs.highlightAll();</script>
+<script>
+// Make all external links open in new tab
+document.querySelectorAll('a[href^="http"]').forEach(a => {{
+  a.target = '_blank';
+}});
+</script>
 <script>
 let sortCol = 'mtime', sortAsc = false;
 function sortDir(e, col) {{
