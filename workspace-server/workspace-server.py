@@ -505,6 +505,8 @@ def _parse_claude_processes(raw):
     if current:
         current["log_tail"] = tail_lines
         procs.append(current)
+    # Filter out bash wrappers and transient processes with no command
+    procs = [p for p in procs if p.get("cmd") and not p["cmd"].startswith("bash") and not p["cmd"].startswith("/bin/bash")]
     return procs
 
 
@@ -520,7 +522,8 @@ def get_crib_status():
     claude_script = (
         'for pid in $(pgrep -f "claud[e]" 2>/dev/null); do '
         '  cmd=$(ps -o args= -p $pid 2>/dev/null); '
-        '  case "$cmd" in "bash "*|"/bin/bash "*) continue;; esac; '
+        '  [ -z "$cmd" ] && continue; '
+        '  case "$cmd" in bash*|/bin/bash*) continue;; esac; '
         '  echo "---PROC---"; '
         '  echo "PID:$pid"; '
         '  echo "CPU:$(ps -o %cpu= -p $pid 2>/dev/null)"; '
