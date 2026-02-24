@@ -300,6 +300,37 @@ def get_pi5_status():
     return status
 
 
+def _parse_claude_processes(raw):
+    """Parse structured claude process output into a list of process dicts."""
+    procs = []
+    if not raw or raw.startswith("error:"):
+        return procs
+    current = None
+    tail_lines = []
+    in_tail = False
+    for line in raw.splitlines():
+        if line == "---PROC---":
+            if current:
+                current["log_tail"] = tail_lines
+                procs.append(current)
+            current = {}
+            tail_lines = []
+            in_tail = False
+        elif line == "---TAIL---":
+            in_tail = True
+        elif line == "---ENDTAIL---":
+            in_tail = False
+        elif in_tail:
+            tail_lines.append(line)
+        elif current is not None and ":" in line:
+            key, _, val = line.partition(":")
+            current[key.strip().lower()] = val.strip()
+    if current:
+        current["log_tail"] = tail_lines
+        procs.append(current)
+    return procs
+
+
 def get_crib_status():
     """Gather crib (192.168.0.152) system status via SSH."""
     status = {"host": "Crib", "ts": datetime.now().isoformat()}
@@ -307,13 +338,30 @@ def get_crib_status():
     status["memory"] = _parse_memory(_run_ssh("free -h"))
     status["disk"] = _parse_disk(_run_ssh("df -h /"))
 
-    # Claude processes
-    claude = _run_ssh("ps aux | grep -i claud[e]")
-    if claude.startswith("error:") or not claude:
-        status["claude_processes"] = {"running": False, "detail": claude or "none found"}
+    # Claude processes — gather detailed info per process
+    claude_script = (
+        'for pid in $(pgrep -f "claud[e]" 2>/dev/null); do '
+        '  echo "---PROC---"; '
+        '  echo "PID:$pid"; '
+        '  echo "CPU:$(ps -o %cpu= -p $pid 2>/dev/null)"; '
+        '  echo "MEM:$(ps -o %mem= -p $pid 2>/dev/null)"; '
+        '  echo "ETIME:$(ps -o etime= -p $pid 2>/dev/null)"; '
+        '  echo "CMD:$(ps -o args= -p $pid 2>/dev/null)"; '
+        '  logfile=$(readlink /proc/$pid/fd/1 2>/dev/null); '
+        '  echo "LOG:$logfile"; '
+        '  if [ -n "$logfile" ] && [ -f "$logfile" ]; then '
+        '    echo "---TAIL---"; '
+        '    tail -5 "$logfile" 2>/dev/null; '
+        '    echo "---ENDTAIL---"; '
+        '  fi; '
+        'done'
+    )
+    claude_raw = _run_ssh(claude_script, timeout=15)
+    procs = _parse_claude_processes(claude_raw)
+    if procs:
+        status["claude_processes"] = {"running": True, "count": len(procs), "processes": procs}
     else:
-        procs = [l for l in claude.splitlines() if l.strip()]
-        status["claude_processes"] = {"running": True, "count": len(procs), "detail": claude}
+        status["claude_processes"] = {"running": False, "count": 0, "processes": []}
 
     return status
 
@@ -380,13 +428,33 @@ def _render_host_card(data):
             badge = '<span class="badge badge-down">NONE</span>'
         h += f'<div class="stat-row"><span class="stat-label">Claude Procs</span><span class="stat-value">{badge}</span></div>'
 
+        procs = cp.get("processes", [])
+        if procs:
+            for p in procs:
+                pid = html.escape(p.get("pid", "?"))
+                cpu = html.escape(p.get("cpu", "?"))
+                mem = html.escape(p.get("mem", "?"))
+                etime = html.escape(p.get("etime", "?"))
+                cmd = html.escape(p.get("cmd", "?"))
+                log = html.escape(p.get("log", ""))
+                tail = p.get("log_tail", [])
+                h += f'<details class="proc-details"><summary>PID {pid} — CPU {cpu}% · MEM {mem}% · up {etime}</summary>'
+                h += f'<div class="proc-info"><div class="proc-cmd">{cmd}</div>'
+                if log:
+                    h += f'<div class="proc-log-path">Log: {log}</div>'
+                if tail:
+                    h += '<pre class="proc-log-tail">' + html.escape('\n'.join(tail)) + '</pre>'
+                h += '</div></details>'
+        elif not running:
+            h += '<div class="proc-none">No active tasks</div>'
+
     h += '</div>'
     return h
 
 
 def render_status_page(pi5, crib):
     """Build the full status dashboard HTML."""
-    body = '<h1>System Status <span id="spinner" style="display:none">⟳</span></h1>'
+    body = '<h1>System Status <span id="spinner" style="display:none">⟳</span> <button id="refresh-btn" onclick="manualRefresh()" title="Refresh Now">Refresh Now</button></h1>'
     body += f'<div id="status-grid" class="status-grid">{_render_host_card(pi5)}{_render_host_card(crib)}</div>'
     body += '<div class="refresh-note" id="refresh-note">Last refreshed: just now · Auto-refreshes every 30s</div>'
 
@@ -429,6 +497,21 @@ def render_status_page(pi5, crib):
         ? '<span class="badge badge-up">' + (cp.count || 0) + ' RUNNING</span>'
         : '<span class="badge badge-down">NONE</span>';
       h += '<div class="stat-row"><span class="stat-label">Claude Procs</span><span class="stat-value">' + badge + '</span></div>';
+      var procs = cp.processes || [];
+      if (procs.length > 0) {
+        for (var i = 0; i < procs.length; i++) {
+          var p = procs[i];
+          var esc = function(s) { return (s||'?').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+          h += '<details class="proc-details"><summary>PID ' + esc(p.pid) + ' \u2014 CPU ' + esc(p.cpu) + '% \u00b7 MEM ' + esc(p.mem) + '% \u00b7 up ' + esc(p.etime) + '</summary>';
+          h += '<div class="proc-info"><div class="proc-cmd">' + esc(p.cmd) + '</div>';
+          if (p.log) h += '<div class="proc-log-path">Log: ' + esc(p.log) + '</div>';
+          var tail = p.log_tail || [];
+          if (tail.length > 0) h += '<pre class="proc-log-tail">' + esc(tail.join('\n')) + '</pre>';
+          h += '</div></details>';
+        }
+      } else if (!cp.running) {
+        h += '<div class="proc-none">No active tasks</div>';
+      }
     }
     h += '</div>';
     return h;
@@ -456,6 +539,10 @@ def render_status_page(pi5, crib):
     note.textContent = 'Last refreshed: ' + ago + ' \\u00b7 Auto-refreshes every 30s';
   }
 
+  window.manualRefresh = function() {
+    refreshStatus();
+  };
+
   setInterval(refreshStatus, 30000);
   setInterval(updateCounter, 1000);
 })();
@@ -468,6 +555,11 @@ def render_status_page(pi5, crib):
 <style>{CSS}{STATUS_DASHBOARD_CSS}
 #spinner {{ display: inline-block; animation: spin 1s linear infinite; color: var(--accent); font-size: 0.8em; }}
 @keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
+#refresh-btn {{ background: var(--card); color: var(--accent); border: 1px solid var(--border); padding: 4px 14px;
+  border-radius: 6px; font-size: 0.5em; cursor: pointer; vertical-align: middle; margin-left: 8px;
+  font-family: inherit; transition: background 0.15s, border-color 0.15s; }}
+#refresh-btn:hover {{ background: var(--border); border-color: var(--accent); }}
+#refresh-btn:active {{ background: var(--accent); color: var(--bg); }}
 </style>
 </head><body>
 <div class="nav">🦞 <strong>Jimmy's Workspace</strong> &nbsp;|&nbsp;
