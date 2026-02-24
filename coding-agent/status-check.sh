@@ -35,20 +35,21 @@ def get_claude_processes():
         mem = run(f"ps -o %mem= -p {pid}").strip()
         etime = run(f"ps -o etime= -p {pid}").strip()
 
-        # Find log file from stdout fd
+        # Read from ~/.claude/debug/ (latest .txt) instead of nohup stdout (buffers)
+        debug_dir = os.path.expanduser("~/.claude/debug")
         logfile = ""
+        log_tail = []
         try:
-            logfile = os.readlink(f"/proc/{pid}/fd/1")
+            txts = sorted(
+                [os.path.join(debug_dir, f) for f in os.listdir(debug_dir) if f.endswith(".txt")],
+                key=os.path.getmtime, reverse=True
+            )
+            if txts:
+                logfile = txts[0]
+                raw = run(f"tail -50 '{logfile}' | grep -E 'called for tool:|\\[API:|\\[ERROR\\]|\\[WARN\\]' | tail -8")
+                log_tail = raw.splitlines() if raw else []
         except Exception:
             pass
-
-        log_tail = []
-        if logfile and os.path.isfile(logfile):
-            try:
-                tail = run(f"tail -5 '{logfile}'")
-                log_tail = tail.splitlines() if tail else []
-            except Exception:
-                pass
 
         procs.append({
             "pid": pid,

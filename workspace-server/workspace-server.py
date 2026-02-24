@@ -300,6 +300,29 @@ def get_pi5_status():
     return status
 
 
+def _clean_debug_line(line):
+    """Shorten a claude debug log line for dashboard display.
+    '2026-02-24T12:11:48.120Z [DEBUG] executePreToolHooks called for tool: Bash'
+    becomes '12:11:48 Tool: Bash'
+    """
+    # Extract time HH:MM:SS from ISO timestamp
+    m = re.match(r'\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})\.\d+Z\s+\[(\w+)\]\s+(.*)', line)
+    if not m:
+        return line.strip()
+    time_str, level, msg = m.group(1), m.group(2), m.group(3)
+    # Simplify common patterns
+    tool_m = re.search(r'called for tool:\s*(\w+)', msg)
+    if tool_m:
+        return f"{time_str} Tool: {tool_m.group(1)}"
+    if '[API:' in msg:
+        return f"{time_str} API request"
+    if level == 'ERROR':
+        return f"{time_str} ERROR: {msg[:80]}"
+    if level == 'WARN':
+        return f"{time_str} WARN: {msg[:80]}"
+    return f"{time_str} {msg[:60]}"
+
+
 def _parse_claude_processes(raw):
     """Parse structured claude process output into a list of process dicts."""
     procs = []
@@ -321,7 +344,7 @@ def _parse_claude_processes(raw):
         elif line == "---ENDTAIL---":
             in_tail = False
         elif in_tail:
-            tail_lines.append(line)
+            tail_lines.append(_clean_debug_line(line))
         elif current is not None and ":" in line:
             key, _, val = line.partition(":")
             current[key.strip().lower()] = val.strip()
@@ -339,6 +362,7 @@ def get_crib_status():
     status["disk"] = _parse_disk(_run_ssh("df -h /"))
 
     # Claude processes — gather detailed info per process (skip bash wrappers)
+    # Read logs from ~/.claude/debug/ (latest .txt) instead of nohup stdout (which buffers)
     claude_script = (
         'for pid in $(pgrep -f "claud[e]" 2>/dev/null); do '
         '  cmd=$(ps -o args= -p $pid 2>/dev/null); '
@@ -349,11 +373,11 @@ def get_crib_status():
         '  echo "MEM:$(ps -o %mem= -p $pid 2>/dev/null)"; '
         '  echo "ETIME:$(ps -o etime= -p $pid 2>/dev/null)"; '
         '  echo "CMD:$cmd"; '
-        '  logfile=$(readlink /proc/$pid/fd/1 2>/dev/null); '
-        '  echo "LOG:$logfile"; '
-        '  if [ -n "$logfile" ] && [ -f "$logfile" ]; then '
+        '  debuglog=$(ls -t ~/.claude/debug/*.txt 2>/dev/null | head -1); '
+        '  echo "LOG:${debuglog:-none}"; '
+        '  if [ -n "$debuglog" ] && [ -f "$debuglog" ]; then '
         '    echo "---TAIL---"; '
-        '    tail -5 "$logfile" 2>/dev/null; '
+        '    tail -50 "$debuglog" 2>/dev/null | grep -E "called for tool:|\\[API:|\\[ERROR\\]|\\[WARN\\]" | tail -8; '
         '    echo "---ENDTAIL---"; '
         '  fi; '
         'done'
@@ -449,12 +473,13 @@ def _render_host_card(data):
                 cpu = html.escape(p.get("cpu", "?"))
                 mem = html.escape(p.get("mem", "?"))
                 etime = html.escape(p.get("etime", "?"))
-                log = html.escape(p.get("log", ""))
+                log = p.get("log", "")
+                log_display = os.path.basename(log) if log else ""
                 tail = p.get("log_tail", [])
                 h += f'<details class="proc-details" open><summary>PID {pid} — CPU {cpu}% · MEM {mem}% · up {etime}</summary>'
                 h += '<div class="proc-info">'
-                if log:
-                    h += f'<div class="proc-log-path">Log: {log}</div>'
+                if log_display:
+                    h += f'<div class="proc-log-path">Debug: {html.escape(log_display)}</div>'
                 if tail:
                     h += '<pre class="proc-log-tail">' + html.escape('\n'.join(tail)) + '</pre>'
                 else:
@@ -519,9 +544,9 @@ def render_status_page(pi5, crib):
           var esc = function(s) { return (s||'?').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
           h += '<details class="proc-details" open><summary>PID ' + esc(p.pid) + ' \u2014 CPU ' + esc(p.cpu) + '% \u00b7 MEM ' + esc(p.mem) + '% \u00b7 up ' + esc(p.etime) + '</summary>';
           h += '<div class="proc-info">';
-          if (p.log) h += '<div class="proc-log-path">Log: ' + esc(p.log) + '</div>';
+          if (p.log) { var logName = p.log.split('/').pop(); h += '<div class="proc-log-path">Debug: ' + esc(logName) + '</div>'; }
           var tail = p.log_tail || [];
-          if (tail.length > 0) h += '<pre class="proc-log-tail">' + esc(tail.join('\\n')) + '</pre>';
+          if (tail.length > 0) h += '<pre class="proc-log-tail">' + tail.map(esc).join('\n') + '</pre>';
           else h += '<div class="proc-none">No log output yet</div>';
           h += '</div></details>';
         }
