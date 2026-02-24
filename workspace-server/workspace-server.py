@@ -364,7 +364,7 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
             self.send_error(404, "Not found")
     
     def serve_directory(self, url_path, fs_path):
-        entries = sorted(fs_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        entries = sorted(fs_path.iterdir(), key=lambda p: (not p.is_dir(), -p.stat().st_mtime))
         items = []
         
         # Check for README
@@ -392,28 +392,29 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
             href = f"{url_path}/{name}".replace('//', '/')
             size = ''
             mtime = ''
+            mtime_val = entry.stat().st_mtime
+            sz = entry.stat().st_size if entry.is_file() else 0
             if entry.is_file():
-                sz = entry.stat().st_size
                 if sz < 1024:
                     size = f'{sz}B'
                 elif sz < 1024*1024:
                     size = f'{sz//1024}KB'
                 else:
                     size = f'{sz//(1024*1024)}MB'
-                # Format mtime as relative or absolute
-                mt = datetime.fromtimestamp(entry.stat().st_mtime)
-                now = datetime.now()
-                diff = now - mt
-                if diff.days == 0:
-                    mtime = mt.strftime('%H:%M')
-                elif diff.days == 1:
-                    mtime = 'yesterday'
-                elif diff.days < 7:
-                    mtime = f'{diff.days}d ago'
-                else:
-                    mtime = mt.strftime('%b %d')
+            # Format mtime as relative or absolute (for both files and folders)
+            mt = datetime.fromtimestamp(mtime_val)
+            now = datetime.now()
+            diff = now - mt
+            if diff.days == 0:
+                mtime = mt.strftime('%H:%M')
+            elif diff.days == 1:
+                mtime = 'yesterday'
+            elif diff.days < 7:
+                mtime = f'{diff.days}d ago'
+            else:
+                mtime = mt.strftime('%b %d')
             
-            items.append(f'<li data-name="{html.escape(name)}" data-size="{sz if entry.is_file() else 0}" data-mtime="{entry.stat().st_mtime if entry.is_file() else 0}"><span class="icon">{icon}</span>'
+            items.append(f'<li data-name="{html.escape(name)}" data-size="{sz}" data-mtime="{mtime_val}"><span class="icon">{icon}</span>'
                         f'<a href="{quote(href)}">{html.escape(name)}</a>'
                         f'<span class="file-meta">{mtime} {size}</span></li>')
         
