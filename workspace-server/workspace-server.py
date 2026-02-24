@@ -382,6 +382,18 @@ STATUS_DASHBOARD_CSS = """
 .refresh-note { color: var(--dim); font-size: 0.8em; text-align: center; margin-top: 16px; }
 .pct-bar { background: var(--bg); border-radius: 4px; height: 8px; margin-top: 4px; }
 .pct-fill { height: 100%; border-radius: 4px; background: var(--accent); }
+.proc-details { margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.proc-details summary { padding: 8px 12px; cursor: pointer; font-size: 0.85em; color: var(--fg);
+                         background: var(--bg); list-style: none; }
+.proc-details summary::-webkit-details-marker { display: none; }
+.proc-details summary::before { content: '\u25b6 '; font-size: 0.7em; }
+.proc-details[open] summary::before { content: '\u25bc '; }
+.proc-info { padding: 8px 12px; font-size: 0.82em; }
+.proc-cmd { color: var(--dim); word-break: break-all; margin-bottom: 4px; }
+.proc-log-path { color: var(--dim); font-size: 0.9em; margin-bottom: 6px; }
+.proc-log-tail { background: var(--bg); padding: 8px; border-radius: 4px; font-size: 0.85em;
+                  overflow-x: auto; margin: 0; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
+.proc-none { color: var(--dim); font-size: 0.85em; padding: 8px 0; font-style: italic; }
 """
 
 
