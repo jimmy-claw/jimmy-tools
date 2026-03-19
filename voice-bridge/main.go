@@ -243,7 +243,13 @@ func askJimmy(text string) (string, error) {
 	var parts []string
 	for _, p := range resp.Result.Payloads {
 		if p.Text != "" {
-			parts = append(parts, p.Text)
+			// Strip system noise from voice responses
+			text := strings.TrimSpace(p.Text)
+			text = strings.TrimSuffix(text, "HEARTBEAT_OK")
+			text = strings.TrimSpace(text)
+			if text != "" {
+				parts = append(parts, text)
+			}
 		}
 	}
 	return strings.Join(parts, " "), nil
