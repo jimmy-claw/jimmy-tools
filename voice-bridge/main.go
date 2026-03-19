@@ -196,13 +196,13 @@ func processAudio(chunks [][]byte, send func(wsMessage)) {
 }
 
 func runSTT(wavPath string) (string, error) {
-	script := `
+	script := fmt.Sprintf(`
 import sys
 from faster_whisper import WhisperModel
-model = WhisperModel(whisperModel, device="cpu", compute_type="int8")
+model = WhisperModel("%s", device="cpu", compute_type="int8")
 segments, _ = model.transcribe(sys.argv[1])
 print(" ".join(s.text for s in segments))
-`
+`, whisperModel)
 	cmd := exec.Command("python3", "-c", script, wavPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
