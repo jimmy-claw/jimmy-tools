@@ -28,13 +28,23 @@ func getenv(key, def string) string {
 }
 
 var (
-	piperBin     = getenv("PIPER_BIN", "/home/vpavlin/.local/bin/piper")
-	piperModel   = getenv("PIPER_MODEL", "/home/vpavlin/.openclaw/workspace/meeting-bot/models/en_GB-alan-medium.onnx")
-	openclawBin  = getenv("OPENCLAW_BIN", "/home/vpavlin/.npm-global/bin/openclaw")
-	listenAddr   = getenv("LISTEN_ADDR", "127.0.0.1:5001")
-	sessionID    = getenv("OPENCLAW_SESSION", "agent:main:telegram:direct:78701493")
-	whisperModel = getenv("WHISPER_MODEL", "tiny")
+	piperBin     string
+	piperModel   string
+	openclawBin  string
+	listenAddr   string
+	sessionID    string
+	whisperModel string
 )
+
+func init() {
+	home := os.Getenv("HOME")
+	piperBin     = getenv("PIPER_BIN",      home+"/.local/bin/piper")
+	piperModel   = getenv("PIPER_MODEL",    home+"/.local/share/piper/en_GB-alan-medium.onnx")
+	openclawBin  = getenv("OPENCLAW_BIN",   home+"/.npm-global/bin/openclaw")
+	listenAddr   = getenv("LISTEN_ADDR",    "127.0.0.1:5001")
+	sessionID    = getenv("OPENCLAW_SESSION", "")
+	whisperModel = getenv("WHISPER_MODEL",  "tiny")
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -203,7 +213,7 @@ print(" ".join(s.text for s in segments))
 
 func askJimmy(text string) (string, error) {
 	cmd := exec.Command(openclawBin, "agent", "--agent", "main", "--session-id", sessionID, "--message", text, "--json")
-	cmd.Env = append(os.Environ(), "HOME=/home/vpavlin")
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%v: %s", err, out)

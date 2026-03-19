@@ -1,0 +1,14 @@
+# Binary
+voice-bridge
+
+# TLS certs (generated locally)
+cert.pem
+key.pem
+
+# Config with secrets
+config.env
+
+# Temp files
+/tmp/
+*.wav
+*.webm
