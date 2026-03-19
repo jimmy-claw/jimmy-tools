@@ -224,7 +224,7 @@ print(" ".join(s.text for s in segments))
 }
 
 func askJimmy(text string) (string, error) {
-	cmd := exec.Command(openclawBin, "agent", "--agent", "main", "-t", "78701493", "--channel", "telegram", "--message", text, "--json")
+	cmd := exec.Command(openclawBin, "agent", "--agent", "main", "-t", "78701493", "--channel", "telegram", "--deliver", "--message", text, "--json")
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
