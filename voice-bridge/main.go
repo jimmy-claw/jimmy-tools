@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -80,6 +81,17 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+
+	// Keep-alive ping every 20s to survive nginx proxy timeout during processing
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}()
 
 	var mu sync.Mutex
 	send := func(msg wsMessage) {
@@ -218,7 +230,6 @@ func askJimmy(text string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%v: %s", err, out)
 	}
-
 	var resp struct {
 		Result struct {
 			Payloads []struct {
@@ -229,16 +240,13 @@ func askJimmy(text string) (string, error) {
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return "", fmt.Errorf("parse json: %v\nraw: %s", err, out)
 	}
-	if len(resp.Result.Payloads) == 0 {
-		return "", fmt.Errorf("no payloads in response")
-	}
 	var parts []string
 	for _, p := range resp.Result.Payloads {
 		if p.Text != "" {
 			parts = append(parts, p.Text)
 		}
 	}
-	return strings.Join(parts, "\n"), nil
+	return strings.Join(parts, " "), nil
 }
 
 func runTTS(text, outPath string) error {

@@ -109,7 +109,7 @@ let state = 'ready'; // ready | recording | processing | playing
 
 function wsUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const base = location.pathname.replace(//talk.*/, ''); return proto + '//' + location.host + base + '/ws';
+  return proto + '//' + location.host + '/ws';
 }
 
 function connect() {
