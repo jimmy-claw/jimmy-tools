@@ -256,6 +256,45 @@ func askJimmy(text string) (string, error) {
 }
 
 func runTTS(text, outPath string) error {
+	ttsURL := getenv("TTS_URL", "http://192.168.0.125:5005/v1/text-to-speech/jimmy")
+
+	body := fmt.Sprintf(`{"text":%s,"model_id":"xtts"}`, func() string {
+		b, _ := json.Marshal(text)
+		return string(b)
+	}())
+
+	resp, err := http.Post(ttsURL, "application/json", strings.NewReader(body))
+	if err != nil {
+		// fallback to piper
+		log.Printf("TTS server unavailable, falling back to piper: %v", err)
+		return runPiper(text, outPath)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		log.Printf("TTS server returned %d, falling back to piper", resp.StatusCode)
+		return runPiper(text, outPath)
+	}
+
+	// Convert MP3 response to WAV
+	mp3Data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	tmpMp3 := outPath + ".mp3"
+	if err := os.WriteFile(tmpMp3, mp3Data, 0644); err != nil {
+		return err
+	}
+	defer os.Remove(tmpMp3)
+
+	cmd := exec.Command("ffmpeg", "-y", "-i", tmpMp3, "-ar", "22050", outPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("ffmpeg: %v: %s", err, out)
+	}
+	return nil
+}
+
+func runPiper(text, outPath string) error {
 	cmd := exec.Command(piperBin, "--model", piperModel, "--output_file", outPath)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
