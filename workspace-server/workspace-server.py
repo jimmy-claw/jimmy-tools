@@ -596,6 +596,138 @@ def get_crib_status():
     return status
 
 
+AGENT_BINARY = "/home/vpavlin/openclaw-coding-agent/target/release/openclaw-agent"
+TASKS_META_DIR = Path("/home/vpavlin/.local/share/openclaw/tasks")
+
+
+def _run_agent_cmd(args, timeout=8):
+    """Run openclaw-agent locally (native arm64 build on Pi5)."""
+    return subprocess.run([AGENT_BINARY] + args, capture_output=True, text=True, timeout=timeout)
+
+
+def _load_task_meta_remote(task_id):
+    """Load .meta.json for a task from local tasks dir."""
+    meta_file = TASKS_META_DIR / f"{task_id}.meta.json"
+    try:
+        if meta_file.exists():
+            return json.loads(meta_file.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _check_executor_reachable(executor):
+    """Quick reachability check for an executor."""
+    etype = executor.get("type", "")
+    host = executor.get("host")
+    if etype == "ssh" and host:
+        try:
+            r = subprocess.run(
+                ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=3',
+                 '-o', 'BatchMode=yes', f'jimmy@{host}', 'echo ok'],
+                capture_output=True, text=True, timeout=4
+            )
+            return r.returncode == 0 and r.stdout.strip() == "ok"
+        except Exception:
+            return False
+    elif etype == "local":
+        return True  # always reachable
+    elif etype == "container":
+        # Check if docker/podman is available
+        try:
+            r = subprocess.run(['docker', 'info'], capture_output=True, timeout=5)
+            return r.returncode == 0
+        except Exception:
+            try:
+                r = subprocess.run(['podman', 'info'], capture_output=True, timeout=5)
+                return r.returncode == 0
+            except Exception:
+                return False
+    return False
+
+
+def _load_task_meta(task_id):
+    """Load prompt and extra info from .meta.json for a task (tries remote crib first)."""
+    return _load_task_meta_remote(task_id)
+
+
+def get_coding_agent_status():
+    """Get coding agent tasks and executor status."""
+    result = {
+        "executors": [],
+        "tasks": [],
+        "summary": {"running": 0, "completed": 0, "failed": 0, "total": 0},
+        "ts": datetime.now().isoformat(),
+    }
+
+    # Get executors
+    try:
+        r = _run_agent_cmd(["executors", "--json"])
+        if r.returncode == 0:
+            executors = json.loads(r.stdout)
+            for ex in executors:
+                ex["reachable"] = _check_executor_reachable(ex)
+            result["executors"] = executors
+    except Exception as e:
+        result["executors_error"] = str(e)
+
+    # Get tasks
+    try:
+        r = _run_agent_cmd(["list", "--jsonl"])
+        if r.returncode == 0:
+            tasks = []
+            for line in r.stdout.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    task = json.loads(line)
+                    tid = task.get("task_id", "")
+                    meta = _load_task_meta(tid)
+                    # Enrich with prompt/command and task_type from meta
+                    prompt = meta.get("prompt", "")
+                    task["prompt"] = prompt[:120] if prompt else ""
+                    if not task.get("task_type") and meta.get("task_type"):
+                        task["task_type"] = meta["task_type"]
+                    if not task.get("workspace") and meta.get("workspace"):
+                        task["workspace"] = meta["workspace"]
+                    # Runtime calculation
+                    started = task.get("started_at") or meta.get("started_at")
+                    finished = task.get("finished_at") or meta.get("finished_at")
+                    if started:
+                        try:
+                            from datetime import timezone
+                            start_dt = datetime.fromisoformat(started.replace('Z', '+00:00'))
+                            if finished:
+                                end_dt = datetime.fromisoformat(finished.replace('Z', '+00:00'))
+                            else:
+                                end_dt = datetime.now(timezone.utc)
+                            delta = int((end_dt - start_dt).total_seconds())
+                            if delta < 60:
+                                task["runtime"] = f"{delta}s"
+                            elif delta < 3600:
+                                task["runtime"] = f"{delta // 60}m {delta % 60}s"
+                            else:
+                                task["runtime"] = f"{delta // 3600}h {(delta % 3600) // 60}m"
+                        except Exception:
+                            task["runtime"] = ""
+                    else:
+                        task["runtime"] = ""
+                    tasks.append(task)
+                    # Count by status
+                    status = task.get("status", "")
+                    if status in result["summary"]:
+                        result["summary"][status] += 1
+                    result["summary"]["total"] += 1
+                except Exception:
+                    continue
+            result["tasks"] = tasks
+    except Exception as e:
+        result["tasks_error"] = str(e)
+
+    return result
+
+
 STATUS_DASHBOARD_CSS = """
 .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
 @media (max-width: 800px) { .status-grid { grid-template-columns: 1fr; } }
@@ -634,6 +766,38 @@ STATUS_DASHBOARD_CSS = """
                  font-size: 0.82em; line-height: 1.8; overflow-x: auto; }
 .activity-line { white-space: nowrap; color: #8b949e; }
 .proc-start-time { color: var(--dim); font-size: 0.85em; padding: 4px 0 8px 0; font-style: italic; }
+"""
+
+AGENT_PANEL_CSS = """
+.agent-panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-top: 20px; }
+.agent-panel h2 { margin-top: 0; font-size: 1.3em; }
+.executor-list { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.executor-chip { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border);
+                  border-radius: 8px; padding: 8px 14px; font-size: 0.85em; }
+.executor-chip .ex-name { font-weight: 600; color: var(--fg); }
+.executor-chip .ex-type { color: var(--dim); font-size: 0.9em; }
+.executor-chip .ex-host { color: var(--dim); font-size: 0.85em; margin-left: 2px; }
+.reach-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.reach-dot.up { background: var(--green); box-shadow: 0 0 6px rgba(158,206,106,0.5); }
+.reach-dot.down { background: var(--red); }
+.reach-dot.unknown { background: var(--dim); }
+.agent-summary { display: flex; gap: 16px; margin: 10px 0 14px; font-size: 0.85em; color: var(--dim); }
+.agent-summary .s-item { display: flex; align-items: center; gap: 5px; }
+.task-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+.task-table th { background: var(--bg); color: var(--accent); font-weight: 600; padding: 8px 10px;
+                  text-align: left; border-bottom: 2px solid var(--border); }
+.task-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.task-table tr:last-child td { border-bottom: none; }
+.task-table tr:hover td { background: rgba(36,40,59,0.5); }
+.task-id { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: var(--dim); }
+.task-prompt { color: var(--fg); max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-prompt.empty { color: var(--dim); font-style: italic; }
+.dim { color: var(--dim); font-size: 0.85em; }
+.badge-running { background: rgba(224,175,104,0.2); color: #e0af68; }
+.badge-completed { background: rgba(158,206,106,0.2); color: var(--green); }
+.badge-failed { background: rgba(247,118,142,0.2); color: var(--red); }
+.task-runtime { color: var(--dim); font-size: 0.85em; white-space: nowrap; }
+.no-tasks { color: var(--dim); font-style: italic; padding: 14px 0; text-align: center; }
 """
 
 
@@ -739,10 +903,162 @@ def _render_host_card(data):
     return h
 
 
+def _render_agent_panel(agent_data):
+    """Render the Coding Agent Tasks panel as HTML."""
+    err = agent_data.get("executors_error") or agent_data.get("tasks_error")
+    h = '<div class="agent-panel" id="agent-panel">'
+    h += '<h2>🤖 Coding Agent Tasks</h2>'
+
+    if err and not agent_data.get("executors") and not agent_data.get("tasks"):
+        h += f'<p style="color:var(--red)">Error: {html.escape(str(err))}</p>'
+        h += '</div>'
+        return h
+
+    # Executors
+    executors = agent_data.get("executors", [])
+    if executors:
+        h += '<div class="executor-list">'
+        for ex in executors:
+            name = html.escape(ex.get("name", "?"))
+            etype = html.escape(ex.get("type", "?"))
+            host = ex.get("host")
+            reachable = ex.get("reachable")
+            if reachable is True:
+                dot_cls = "up"
+                dot_title = "Reachable"
+            elif reachable is False:
+                dot_cls = "down"
+                dot_title = "Unreachable"
+            else:
+                dot_cls = "unknown"
+                dot_title = "Unknown"
+            h += f'<div class="executor-chip">'
+            h += f'<span class="reach-dot {dot_cls}" title="{dot_title}"></span>'
+            h += f'<span class="ex-name">{name}</span>'
+            h += f'<span class="ex-type">{etype}</span>'
+            if host:
+                h += f'<span class="ex-host">({html.escape(host)})</span>'
+            h += '</div>'
+        h += '</div>'
+
+    # Summary
+    s = agent_data.get("summary", {})
+    total = s.get("total", 0)
+    running = s.get("running", 0)
+    completed = s.get("completed", 0)
+    failed = s.get("failed", 0)
+    h += '<div class="agent-summary">'
+    h += f'<span class="s-item"><span class="badge badge-running">{running} running</span></span>'
+    h += f'<span class="s-item"><span class="badge badge-completed">{completed} completed</span></span>'
+    h += f'<span class="s-item"><span class="badge badge-failed">{failed} failed</span></span>'
+    h += f'<span class="s-item" style="margin-left:auto">{total} total</span>'
+    h += '</div>'
+
+    # Tasks table
+    tasks = agent_data.get("tasks", [])
+    if not tasks:
+        h += '<div class="no-tasks">No tasks yet</div>'
+    else:
+        h += '<table class="task-table"><thead><tr>'
+        h += '<th>ID</th><th>Type</th><th>Executor</th><th>Status</th><th>Runtime</th><th>Command / Prompt</th>'
+        h += '</tr></thead><tbody>'
+        for task in tasks[:20]:  # limit to 20 most recent
+            tid = task.get("task_id", "?")
+            short_id = tid[:8] if len(tid) >= 8 else tid
+            executor = html.escape(task.get("executor", "?"))
+            executor_type = task.get("executor_type", "")
+            task_type = task.get("task_type", "claude_code")
+            type_icon = "⚙️" if task_type == "shell_command" else "🤖"
+            type_label = "shell" if task_type == "shell_command" else "claude"
+            status = task.get("status", "?")
+            runtime = html.escape(task.get("runtime", ""))
+            prompt = task.get("prompt", "")
+            workspace = task.get("workspace", "")
+            if status == "running":
+                badge_cls = "badge-running"
+                status_label = "running"
+            elif status == "completed":
+                badge_cls = "badge-completed"
+                status_label = "done"
+            elif status == "failed":
+                badge_cls = "badge-failed"
+                status_label = "failed"
+            else:
+                badge_cls = "badge"
+                status_label = html.escape(status)
+            prompt_cls = "task-prompt" if prompt else "task-prompt empty"
+            prompt_display = html.escape(prompt) if prompt else "no prompt"
+            tooltip = html.escape(prompt)
+            if workspace:
+                tooltip = html.escape(f"[{workspace}] {prompt}")
+            executor_display = executor
+            if executor_type:
+                executor_display = f'{executor} <span class="dim">({html.escape(executor_type)})</span>'
+            h += '<tr>'
+            h += f'<td><span class="task-id">{html.escape(short_id)}</span></td>'
+            h += f'<td><span title="{html.escape(task_type)}">{type_icon} {type_label}</span></td>'
+            h += f'<td>{executor_display}</td>'
+            h += f'<td><span class="badge {badge_cls}">{status_label}</span></td>'
+            h += f'<td><span class="task-runtime">{runtime}</span></td>'
+            h += f'<td><span class="{prompt_cls}" title="{tooltip}">{prompt_display}</span></td>'
+            h += '</tr>'
+        h += '</tbody></table>'
+
+    h += '</div>'
+    return h
+
+
+def get_subagent_status():
+    """Read active sub-agent sessions from OpenClaw sessions.json index."""
+    import time
+    index_file = Path("/home/vpavlin/.openclaw/agents/main/sessions/sessions.json")
+    if not index_file.exists():
+        return {"agents": [], "error": "no sessions index"}
+
+    try:
+        with open(index_file) as f:
+            all_sessions = json.load(f)
+    except Exception as e:
+        return {"agents": [], "error": str(e)}
+
+    agents = []
+    now = time.time()
+    for key, rec in all_sessions.items():
+        if "subagent" not in key:
+            continue
+        label = rec.get("label") or key.split(":")[-1][:32]
+        updated_ms = rec.get("updatedAt", 0)
+        age_s = int(now - updated_ms / 1000) if updated_ms else -1
+        # Consider active if updated within last 30 minutes
+        active = age_s >= 0 and age_s < 1800
+        total_tokens = rec.get("totalTokens", 0)
+        model = rec.get("model", "")
+        agents.append({
+            "key": key,
+            "label": label,
+            "active": active,
+            "age_s": age_s,
+            "model": model,
+            "total_tokens": total_tokens,
+        })
+
+    # Sort: active first, then by recency
+    agents.sort(key=lambda a: (not a["active"], a["age_s"]))
+    # Return only last 20
+    return {"agents": agents[:20]}
+
+
 def render_status_page(pi5, crib):
     """Build the full status dashboard HTML."""
     body = '<h1>System Status <span id="spinner" style="display:none">⟳</span> <button id="refresh-btn" onclick="manualRefresh()" title="Refresh Now">Refresh Now</button></h1>'
     body += f'<div id="status-grid" class="status-grid">{_render_host_card(pi5)}{_render_host_card(crib)}</div>'
+
+    # Coding agent panel — placeholder, filled by JS via /coding-agent-status
+    body += '<div class="agent-panel" id="agent-panel"><h2>🤖 Coding Agent Tasks</h2><div class="no-tasks" id="agent-loading">Loading…</div></div>'
+
+    # Sub-agents panel — placeholder, filled by JS via /subagent-status
+    body += '<div class="agent-panel" id="subagent-panel"><h2>🧠 Active Sub-Agents</h2><div class="no-tasks" id="subagent-loading">Loading…</div></div>'
+
     body += '<div class="refresh-note" id="refresh-note">Last refreshed: just now · Auto-refreshes every 30s</div>'
 
     status_js = """
@@ -837,6 +1153,137 @@ def render_status_page(pi5, crib):
     return h;
   }
 
+  function esc2(s) { return esc(s); }
+
+  function renderAgentPanel(data) {
+    var h = '';
+    var executors = data.executors || [];
+    if (executors.length > 0) {
+      h += '<div class="executor-list">';
+      for (var i = 0; i < executors.length; i++) {
+        var ex = executors[i];
+        var dotCls = ex.reachable === true ? 'up' : (ex.reachable === false ? 'down' : 'unknown');
+        var dotTitle = ex.reachable === true ? 'Reachable' : (ex.reachable === false ? 'Unreachable' : 'Unknown');
+        h += '<div class="executor-chip">';
+        h += '<span class="reach-dot ' + dotCls + '" title="' + dotTitle + '"></span>';
+        h += '<span class="ex-name">' + esc(ex.name) + '</span>';
+        h += '<span class="ex-type">' + esc(ex.type) + '</span>';
+        if (ex.host) h += '<span class="ex-host">(' + esc(ex.host) + ')</span>';
+        h += '</div>';
+      }
+      h += '</div>';
+    }
+    var s = data.summary || {};
+    h += '<div class="agent-summary">';
+    h += '<span class="s-item"><span class="badge badge-running">' + (s.running||0) + ' running</span></span>';
+    h += '<span class="s-item"><span class="badge badge-completed">' + (s.completed||0) + ' completed</span></span>';
+    h += '<span class="s-item"><span class="badge badge-failed">' + (s.failed||0) + ' failed</span></span>';
+    h += '<span class="s-item" style="margin-left:auto">' + (s.total||0) + ' total</span>';
+    h += '</div>';
+    var tasks = data.tasks || [];
+    if (tasks.length === 0) {
+      h += '<div class="no-tasks">No tasks yet</div>';
+    } else {
+      h += '<table class="task-table"><thead><tr><th>ID</th><th>Type</th><th>Executor</th><th>Status</th><th>Runtime</th><th>Command / Prompt</th></tr></thead><tbody>';
+      var limit = Math.min(tasks.length, 20);
+      for (var j = 0; j < limit; j++) {
+        var t = tasks[j];
+        var tid = t.task_id || '';
+        var shortId = tid.length >= 8 ? tid.substr(0,8) : tid;
+        var status = t.status || '?';
+        var badgeCls = status === 'running' ? 'badge-running' : (status === 'completed' ? 'badge-completed' : (status === 'failed' ? 'badge-failed' : 'badge'));
+        var statusLabel = status === 'running' ? 'running' : (status === 'completed' ? 'done' : (status === 'failed' ? 'failed' : status));
+        var taskType = t.task_type || 'claude_code';
+        var typeIcon = taskType === 'shell_command' ? '⚙️' : '🤖';
+        var typeLabel = taskType === 'shell_command' ? 'shell' : 'claude';
+        var executorType = t.executor_type || '';
+        var executorDisplay = esc(t.executor || '?');
+        if (executorType) executorDisplay += ' <span class="dim">(' + esc(executorType) + ')</span>';
+        var prompt = t.prompt || '';
+        var workspace = t.workspace || '';
+        var tooltip = workspace ? '[' + esc(workspace) + '] ' + esc(prompt) : esc(prompt);
+        var promptCls = prompt ? 'task-prompt' : 'task-prompt empty';
+        var promptDisplay = prompt ? esc(prompt) : 'no prompt';
+        h += '<tr>';
+        h += '<td><span class="task-id">' + esc(shortId) + '</span></td>';
+        h += '<td><span title="' + esc(taskType) + '">' + typeIcon + ' ' + typeLabel + '</span></td>';
+        h += '<td>' + executorDisplay + '</td>';
+        h += '<td><span class="badge ' + badgeCls + '">' + statusLabel + '</span></td>';
+        h += '<td><span class="task-runtime">' + esc(t.runtime||'') + '</span></td>';
+        h += '<td><span class="' + promptCls + '" title="' + tooltip + '">' + promptDisplay + '</span></td>';
+        h += '</tr>';
+      }
+      h += '</tbody></table>';
+    }
+    return h;
+  }
+
+  function fmtAge(s) {
+    if (s < 0) return '?';
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s/60) + 'm ago';
+    return Math.floor(s/3600) + 'h ago';
+  }
+
+  function refreshSubagentPanel() {
+    fetch('/subagent-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var panel = document.getElementById('subagent-panel');
+        if (!panel) return;
+        var h2 = panel.querySelector('h2');
+        var content = '';
+        if (data.error && (!data.agents || !data.agents.length)) {
+          content = '<div class="no-tasks">' + esc(data.error) + '</div>';
+        } else if (!data.agents || !data.agents.length) {
+          content = '<div class="no-tasks">No sub-agents found</div>';
+        } else {
+          var active = data.agents.filter(function(a) { return a.active; });
+          var inactive = data.agents.filter(function(a) { return !a.active; });
+          content += '<div class="agent-summary"><span class="s-item">🟢 ' + active.length + ' active</span><span class="s-item">⏹ ' + inactive.length + ' recent</span></div>';
+          content += '<table style="width:100%;border-collapse:collapse;font-size:0.85em">';
+          content += '<thead><tr style="color:var(--dim);text-align:left"><th style="padding:4px 8px">Label</th><th style="padding:4px 8px">Status</th><th style="padding:4px 8px">Updated</th><th style="padding:4px 8px">Tokens</th></tr></thead><tbody>';
+          data.agents.forEach(function(a) {
+            var statusBadge = a.active
+              ? '<span class="badge badge-up">RUNNING</span>'
+              : '<span class="badge" style="background:var(--dim);color:var(--bg)">DONE</span>';
+            var tok = a.total_tokens >= 1000000 ? '1M' : (a.total_tokens >= 1000 ? Math.round(a.total_tokens/1000) + 'k' : a.total_tokens);
+            content += '<tr style="border-top:1px solid var(--border)">';
+            content += '<td style="padding:5px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(a.key) + '">' + esc(a.label) + '</td>';
+            content += '<td style="padding:5px 8px">' + statusBadge + '</td>';
+            content += '<td style="padding:5px 8px;color:var(--dim)">' + fmtAge(a.age_s) + '</td>';
+            content += '<td style="padding:5px 8px;color:var(--dim)">' + tok + '</td>';
+            content += '</tr>';
+          });
+          content += '</tbody></table>';
+        }
+        if (h2) {
+          panel.innerHTML = h2.outerHTML + content;
+        } else {
+          panel.innerHTML = '<h2>&#x1F9E0; Active Sub-Agents</h2>' + content;
+        }
+      })
+      .catch(function() {});
+  }
+
+  function refreshAgentPanel() {
+    fetch('/coding-agent-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var panel = document.getElementById('agent-panel');
+        if (!panel) return;
+        // Keep h2 header, replace content after it
+        var h2 = panel.querySelector('h2');
+        var newContent = renderAgentPanel(data);
+        if (h2) {
+          panel.innerHTML = h2.outerHTML + newContent;
+        } else {
+          panel.innerHTML = '<h2>&#x1F916; Coding Agent Tasks</h2>' + newContent;
+        }
+      })
+      .catch(function() {});
+  }
+
   function refreshStatus() {
     spinner.style.display = 'inline';
     fetch('/system-status')
@@ -848,6 +1295,8 @@ def render_status_page(pi5, crib):
       })
       .catch(function() {})
       .finally(function() { spinner.style.display = 'none'; });
+    refreshAgentPanel();
+    refreshSubagentPanel();
   }
 
   function updateCounter() {
@@ -865,6 +1314,9 @@ def render_status_page(pi5, crib):
 
   setInterval(refreshStatus, 30000);
   setInterval(updateCounter, 1000);
+  // Initial agent panel load (async, doesn't block page render)
+  refreshAgentPanel();
+  refreshSubagentPanel();
 })();
 </script>"""
 
@@ -873,7 +1325,7 @@ def render_status_page(pi5, crib):
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/png" href="/favicon.ico">
 <title>System Status — Jimmy's Workspace</title>
-<style>{CSS}{STATUS_DASHBOARD_CSS}
+<style>{CSS}{STATUS_DASHBOARD_CSS}{AGENT_PANEL_CSS}
 #spinner {{ display: inline-block; animation: spin 1s linear infinite; color: var(--accent); font-size: 0.8em; }}
 @keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
 #refresh-btn {{ background: var(--card); color: var(--accent); border: 1px solid var(--border); padding: 4px 14px;
@@ -936,6 +1388,23 @@ def page(title, body, path='/'):
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>hljs.highlightAll();</script>
 <script>
+// Add copy buttons to code blocks
+document.querySelectorAll('pre').forEach(pre => {{
+  const btn = document.createElement('button');
+  btn.textContent = 'Copy';
+  btn.style.cssText = 'position:absolute;top:8px;right:8px;padding:3px 10px;font-size:12px;border:1px solid var(--border,#444);border-radius:4px;background:var(--card,#1a1a1a);color:var(--text,#eee);cursor:pointer;opacity:0.7;';
+  btn.addEventListener('click', () => {{
+    const code = pre.querySelector('code');
+    navigator.clipboard.writeText(code ? code.innerText : pre.innerText).then(() => {{
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 1500);
+    }});
+  }});
+  pre.style.position = 'relative';
+  pre.appendChild(btn);
+}});
+</script>
+<script>
 // Make all external links open in new tab
 document.querySelectorAll('a[href^="http"]').forEach(a => {{
   a.target = '_blank';
@@ -974,7 +1443,9 @@ function sortDir(e, col) {{
 
 class WorkspaceHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
-        path = unquote(self.path).rstrip('/')
+        # Strip query string before path processing, but keep self.path intact for raw check
+        raw_path = self.path.split('?')[0]
+        path = unquote(raw_path).rstrip('/')
         if not path:
             path = '/'
         
@@ -991,20 +1462,24 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
             return
 
         # Coding agent status endpoint
+        if path == '/subagent-status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            try:
+                data = get_subagent_status()
+                self.wfile.write(json.dumps(data).encode())
+            except Exception as e:
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+
         if path == '/coding-agent-status':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             try:
-                result = subprocess.run(
-                    ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=5',
-                     'jimmy@192.168.0.152', 'cat', '~/coding-agent-status.json'],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode == 0:
-                    self.wfile.write(result.stdout.encode())
-                else:
-                    self.wfile.write(b'{"error": "SSH failed"}')
+                data = get_coding_agent_status()
+                self.wfile.write(json.dumps(data).encode())
             except Exception as e:
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
@@ -1063,6 +1538,44 @@ class WorkspaceHandler(SimpleHTTPRequestHandler):
                         body += f'<li style="color:var(--dim)">...and {len(matches)-5} more matches</li>'
                     body += '</ul>'
             self.send_html(page(f'Search: {query}', body, '/search'))
+            return
+        
+        if path.startswith('/rag-search'):
+            from urllib.parse import parse_qs, urlparse, quote as url_quote
+            import urllib.request
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            query = params.get('q', [''])[0]
+            top_k = params.get('top_k', ['10'])[0]
+            collection = params.get('collection', ['all'])[0]
+            if not query:
+                self.send_html(page('RAG Search', '<h1>🧠 RAG Semantic Search</h1><p>Search across memory and repos using AI embeddings.</p><form method="GET" action="/rag-search"><input name="q" placeholder="semantic query..." style="padding:8px;width:400px;background:var(--bg);color:var(--fg);border:1px solid var(--dim)"><button style="padding:8px 16px;margin-left:8px">Search</button></form>', '/rag-search'))
+                return
+            try:
+                rag_url = f'http://127.0.0.1:8766/search?q={url_quote(query)}&top_k={top_k}&collection={collection}'
+                req = urllib.request.Request(rag_url, headers={'Accept': 'application/json'})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read())
+                results = data.get('results', [])
+                body = f'<h1>🧠 RAG: "{html.escape(query)}"</h1>'
+                body += f'<form method="GET" action="/rag-search"><input name="q" value="{html.escape(query)}" style="padding:8px;width:400px;background:var(--bg);color:var(--fg);border:1px solid var(--dim)"><button style="padding:8px 16px;margin-left:8px">Search</button></form>'
+                if not results:
+                    body += '<p style="color:var(--dim)">No results found.</p>'
+                else:
+                    body += f'<p style="color:var(--dim)">{len(results)} semantic matches</p>'
+                    for r in results:
+                        score = 1 - r.get('distance', 0)
+                        rpath = r.get('path', '')
+                        col = r.get('collection', '')
+                        lines = f"L{r.get('line_start','')}-{r.get('line_end','')}"
+                        body += f'<div style="margin:16px 0;padding:12px;border-left:3px solid var(--accent);background:rgba(255,255,255,0.03)">'
+                        body += f'<div><strong>[{html.escape(col)}]</strong> <a href="/{url_quote(rpath)}">{html.escape(rpath)}</a> <span style="color:var(--dim)">{lines} (score: {score:.2f})</span></div>'
+                        body += f'<pre style="margin:8px 0;white-space:pre-wrap;font-size:0.85em">{html.escape(r.get("text","")[:500])}</pre>'
+                        body += '</div>'
+                self.send_html(page(f'RAG: {query}', body, '/rag-search'))
+            except Exception as e:
+                body = f'<h1>🧠 RAG Search Error</h1><p style="color:red">Could not reach RAG server on K11: {html.escape(str(e))}</p><p>Make sure <code>jimmy-rag-server.py</code> is running on 192.168.0.125:8766</p>'
+                self.send_html(page('RAG Error', body, '/rag-search'))
             return
         
         fs_path = WORKSPACE / path.lstrip('/')
@@ -1200,3 +1713,5 @@ if __name__ == '__main__':
     print(f"   Local: http://pi5.local:{PORT}")
     print(f"   Serving: {WORKSPACE}")
     server.serve_forever()
+# Note: RAG search requires SSH tunnel to K11:
+# ssh -f -N -L 8766:localhost:8766 jimmy@192.168.0.125
